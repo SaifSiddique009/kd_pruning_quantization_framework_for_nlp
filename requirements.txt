@@ -1,0 +1,36 @@
+# =============================================================================
+# REQUIREMENTS FOR COMPRESSION FRAMEWORK
+# =============================================================================
+
+# Core ML libraries
+torch>=2.0.0
+transformers>=4.30.0
+datasets>=2.0.0
+
+# Scientific computing
+numpy>=1.21.0
+pandas>=1.3.0
+scikit-learn>=1.0.0
+
+# Visualization (optional, for analysis)
+matplotlib>=3.5.0
+seaborn>=0.11.0
+
+# Progress bars
+tqdm>=4.60.0
+
+# Multi-label stratification (optional but recommended)
+iterative-stratification>=0.1.7
+
+# Experiment tracking (optional)
+mlflow>=2.0.0
+
+# Hugging Face Hub (for model upload/download)
+huggingface-hub>=0.14.0
+
+# Note: Some packages may have different version requirements
+# depending on your Python version and CUDA version.
+#
+# For Kaggle:
+# Most of these are pre-installed. Only need:
+#   pip install iterative-stratification
