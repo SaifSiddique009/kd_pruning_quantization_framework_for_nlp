@@ -376,16 +376,20 @@ def log_stage_end(
     logger.info("")
     logger.info(f"COMPLETED STAGE: {stage.upper()}")
 
-    if metrics:
-        logger.info("Stage Metrics Summary:")
-        key_metrics = ['f1_macro', 'model_size_mb', 'sparsity', 'compression_ratio']
-        for metric in key_metrics:
-            if metric in metrics:
-                value = metrics[metric]
-                if isinstance(value, float):
-                    logger.info(f"  {metric}: {value:.4f}")
-                else:
-                    logger.info(f"  {metric}: {value}")
+    if metrics is not None:
+        # Handle case where metrics is just a single float (f1_macro value)
+        if isinstance(metrics, (int, float)):
+            logger.info(f"  F1 Macro: {float(metrics):.4f}")
+        elif isinstance(metrics, dict):
+            logger.info("Stage Metrics Summary:")
+            key_metrics = ['f1_macro', 'model_size_mb', 'sparsity', 'compression_ratio']
+            for metric in key_metrics:
+                if metric in metrics:
+                    value = metrics[metric]
+                    if isinstance(value, float):
+                        logger.info(f"  {metric}: {value:.4f}")
+                    else:
+                        logger.info(f"  {metric}: {value}")
 
     logger.info("=" * 70)
     log_memory_usage(logger)
