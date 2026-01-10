@@ -115,7 +115,16 @@ def parse_compression_arguments(args_list: Optional[List[str]] = None):
     parser.add_argument('--warmup_ratio', type=float, default=0.1)
     parser.add_argument('--gradient_clip_norm', type=float, default=1.0)
     parser.add_argument('--early_stopping_patience', type=int, default=5)
-    
+
+    # Fair Evaluation (Original Fold Splits)
+    parser.add_argument('--use_original_folds', action='store_true',
+                       help='Use MultilabelStratifiedKFold to recreate original training splits (for fair evaluation)')
+    parser.add_argument('--eval_fold', type=int, default=3, choices=[1, 2, 3, 4, 5],
+                       help='Which fold to use for validation when using original folds (1-5, default: 3)')
+    parser.add_argument('--stratification', type=str, default='multilabel',
+                       choices=['multilabel', 'multiclass', 'none'],
+                       help='Stratification type for K-fold splits (default: multilabel)')
+
     # KD Parameters
     parser.add_argument('--kd_alpha', type=float, default=0.7,
                        help='0=hard labels only, 1=soft labels only')
@@ -236,6 +245,14 @@ def print_compression_config(config):
             print(f"   Priority Labels: {non_default}")
     if hasattr(config, 'run_full_kfold') and config.run_full_kfold:
         print(f"   K-Fold Mode: Full (all {config.num_folds} folds)")
+
+    # Fair evaluation mode
+    if hasattr(config, 'use_original_folds') and config.use_original_folds:
+        print(f"\n[Fair Evaluation Mode]:")
+        print(f"   Using original training fold splits")
+        print(f"   Validation fold: {config.eval_fold}")
+        print(f"   Stratification: {config.stratification}")
+        print(f"   This ensures no data leakage from training set")
     
     # Show what will happen
     print(f"\n[Compression Flow]:")

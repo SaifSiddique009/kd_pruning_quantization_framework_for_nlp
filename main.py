@@ -63,7 +63,7 @@ from compression_config import (
 from data import (
     load_and_preprocess_data, get_or_create_tokenized_dataset,
     prepare_kfold_splits, calculate_class_weights,
-    create_data_loaders, IndexedDataset
+    create_data_loaders, IndexedDataset, get_fold_indices
 )
 from distillation import (
     TeacherModel, StudentModel, DistillationTrainer,
@@ -235,7 +235,7 @@ probs = predict("আপনার বাংলা টেক্সট এখান
 print(probs)
 '''.format(save_path=save_path)
     
-    with open(os.path.join(save_path, 'how_to_load.py'), 'w') as f:
+    with open(os.path.join(save_path, 'how_to_load.py'), 'w', encoding='utf-8') as f:
         f.write(loading_script)
     
     print(f"[OK] Model saved in HuggingFace format: {save_path}")
@@ -1162,17 +1162,36 @@ def run_compression_pipeline(config):
     has_student_tokens = 'student_input_ids' in tokenized_data
 
     # K-fold splits
-    num_folds = config.num_folds if config.run_full_kfold else 1
-    splits = list(prepare_kfold_splits(
-        comments, labels, num_folds,
-        stratification_type='multilabel', seed=config.seed
-    ))
+    # Check for --use_original_folds (fair evaluation mode)
+    if config.use_original_folds:
+        # Use original MultilabelStratifiedKFold splits for fair evaluation
+        print(f"\n[Fair Evaluation Mode]")
+        print(f"   Using original fold splits to match training")
+        print(f"   Evaluating on Fold {config.eval_fold} validation set")
+        logger.info(f"Fair evaluation mode: using original fold {config.eval_fold}")
 
-    if config.run_full_kfold:
-        logger.info(f"Running full {num_folds}-fold cross-validation")
-        print(f"   [K-Fold] Running all {num_folds} folds")
+        train_idx, val_idx = get_fold_indices(
+            labels=labels,
+            fold_idx=config.eval_fold,
+            num_folds=config.num_folds,
+            stratification=config.stratification,
+            seed=config.seed
+        )
+        splits = [(train_idx, val_idx)]
+        num_folds = 1  # Only run the specified fold
     else:
-        logger.info("Running single fold (fold 1)")
+        # Standard mode: create splits based on config
+        num_folds = config.num_folds if config.run_full_kfold else 1
+        splits = list(prepare_kfold_splits(
+            comments, labels, num_folds,
+            stratification_type='multilabel', seed=config.seed
+        ))
+
+        if config.run_full_kfold:
+            logger.info(f"Running full {num_folds}-fold cross-validation")
+            print(f"   [K-Fold] Running all {num_folds} folds")
+        else:
+            logger.info("Running single fold (fold 1)")
 
     # Initialize evaluator
     evaluator = CompressionEvaluator()

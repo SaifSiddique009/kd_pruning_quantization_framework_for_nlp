@@ -540,6 +540,97 @@ def prepare_kfold_splits(
     return list(kfold.split(comments))
 
 
+def get_fold_indices(
+    labels: np.ndarray,
+    fold_idx: int,
+    num_folds: int = 5,
+    stratification: str = 'multilabel',
+    seed: int = 42
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Get train/val indices for a specific fold, matching original training splits.
+
+    This function recreates the EXACT same fold splits used during original training,
+    allowing for fair evaluation without data leakage.
+
+    CRITICAL: To match original training splits, you must use:
+    - Same num_folds (typically 5)
+    - Same stratification type (typically 'multilabel')
+    - Same seed (typically 42)
+    - Same fold_idx (1-indexed, matching which fold was used for validation)
+
+    Args:
+        labels: numpy array of shape (n_samples, n_labels) for multilabel,
+                or (n_samples,) for single-label
+        fold_idx: 1-indexed fold number (1-5 for 5-fold CV)
+                  This is the fold used for VALIDATION
+        num_folds: number of folds (default 5)
+        stratification: 'multilabel', 'multiclass', or 'none'
+        seed: random seed (default 42)
+
+    Returns:
+        train_idx, val_idx: numpy arrays of indices
+
+    Example:
+        # Get fold 3 splits (matching original training where fold 3 was validation)
+        train_idx, val_idx = get_fold_indices(labels, fold_idx=3)
+        # train_idx contains indices from folds 1,2,4,5
+        # val_idx contains indices from fold 3
+    """
+    if fold_idx < 1 or fold_idx > num_folds:
+        raise ValueError(f"fold_idx must be between 1 and {num_folds}, got {fold_idx}")
+
+    print(f"\n[Fold Split] Recreating original fold splits...")
+    print(f"   Stratification: {stratification}")
+    print(f"   Num folds: {num_folds}")
+    print(f"   Seed: {seed}")
+    print(f"   Validation fold: {fold_idx}")
+
+    # Try multilabel stratification first
+    if stratification == 'multilabel':
+        try:
+            from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
+            print(f"   Using MultilabelStratifiedKFold (matches original training)")
+            kfold = MultilabelStratifiedKFold(
+                n_splits=num_folds,
+                shuffle=True,
+                random_state=seed
+            )
+            stratify_labels = labels
+        except ImportError:
+            print("   WARNING: iterative-stratification not installed!")
+            print("      Install: pip install iterative-stratification")
+            print("      Falling back to basic KFold (may not match original splits!)")
+            from sklearn.model_selection import KFold
+            kfold = KFold(n_splits=num_folds, shuffle=True, random_state=seed)
+            stratify_labels = None
+
+    elif stratification == 'multiclass':
+        print(f"   Using StratifiedKFold on primary label")
+        # Create single-label version (use first non-zero label)
+        if len(labels.shape) > 1:
+            primary_labels = np.argmax(labels, axis=1)
+        else:
+            primary_labels = labels
+        kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=seed)
+        stratify_labels = primary_labels
+
+    else:  # 'none'
+        print(f"   Using basic KFold (no stratification)")
+        from sklearn.model_selection import KFold
+        kfold = KFold(n_splits=num_folds, shuffle=True, random_state=seed)
+        stratify_labels = None
+
+    # Iterate through folds to find the requested one
+    for i, (train_idx, val_idx) in enumerate(kfold.split(labels, stratify_labels)):
+        if i + 1 == fold_idx:  # 1-indexed
+            print(f"   Train samples: {len(train_idx)}")
+            print(f"   Val samples: {len(val_idx)}")
+            return train_idx, val_idx
+
+    raise ValueError(f"Fold {fold_idx} not found (should not happen)")
+
+
 # =============================================================================
 # CLASS WEIGHTS
 # =============================================================================
