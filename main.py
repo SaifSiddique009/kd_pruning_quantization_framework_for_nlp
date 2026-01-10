@@ -433,30 +433,36 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
         tokenizer = AutoTokenizer.from_pretrained(config.teacher_checkpoint)
         print(f"   [Tokenizer] Loaded from: {config.teacher_checkpoint}")
 
-        # Try to load using custom format (encoder/ + classifier_head.pt)
-        # This matches the format used by TransformerMultiLabelClassifier
+        # Load using TransformerMultiLabelClassifier format
         try:
-            from huggingface_hub import hf_hub_download, snapshot_download
-            import tempfile
+            from huggingface_hub import snapshot_download
 
-            print("   [Format] Detected custom format (encoder/ + classifier_head.pt)")
+            print("   [Format] TransformerMultiLabelClassifier format")
 
-            # Download the entire repo to get the structure
+            # Download repo including pytorch_model.bin
             local_dir = snapshot_download(
                 repo_id=config.teacher_checkpoint,
-                allow_patterns=["encoder/*", "classifier_*.json", "classifier_head.pt", "config.json"]
+                allow_patterns=["encoder/*", "classifier_*.json", "classifier_head.pt",
+                               "pytorch_model.bin", "config.json"]
             )
             print(f"   [Download] Files cached to: {local_dir}")
+
+            # Load classifier config to get base model name
+            config_path = os.path.join(local_dir, 'classifier_config.json')
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    classifier_config = json.load(f)
+                print(f"   [Config] Base model: {classifier_config.get('base_model_name')}")
+                print(f"   [Config] Num labels: {classifier_config.get('num_labels')}")
 
             # Check for encoder subfolder
             encoder_path = os.path.join(local_dir, 'encoder')
             if os.path.exists(encoder_path):
-                print(f"   [Encoder] Loading from: {encoder_path}")
                 encoder_model_path = encoder_path
+                print(f"   [Encoder] Found at: {encoder_path}")
             else:
-                # Fallback: encoder might be at root level
                 encoder_model_path = local_dir
-                print(f"   [Encoder] Loading from root: {local_dir}")
+                print(f"   [Encoder] Using root: {local_dir}")
 
             # Create TeacherModel with encoder
             teacher = TeacherModel(
@@ -464,71 +470,61 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
                 num_labels=num_labels,
                 dropout=config.dropout
             )
-            print(f"   [Encoder] Loaded successfully!")
+            print(f"   [Encoder] Architecture loaded!")
 
-            # Load classifier weights from classifier_head.pt
-            classifier_path = os.path.join(local_dir, 'classifier_head.pt')
-            if not os.path.exists(classifier_path):
-                # Try alternative name
-                classifier_path = os.path.join(local_dir, 'classifier.pt')
+            # Method 1: Load from pytorch_model.bin (full model state dict)
+            pytorch_model_path = os.path.join(local_dir, 'pytorch_model.bin')
+            loaded_weights = False
 
-            if os.path.exists(classifier_path):
-                classifier_state = torch.load(classifier_path, map_location='cpu')
-                teacher.classifier.load_state_dict(classifier_state)
-                print(f"   [Classifier] Loaded from: {os.path.basename(classifier_path)}")
-            else:
-                print(f"   [Classifier] No saved weights found, using fresh classifier")
+            if os.path.exists(pytorch_model_path):
+                print(f"   [Weights] Loading from pytorch_model.bin...")
+                full_state_dict = torch.load(pytorch_model_path, map_location='cpu')
 
-            # Load classifier config if available
-            config_path = os.path.join(local_dir, 'classifier_config.json')
-            if os.path.exists(config_path):
-                with open(config_path, 'r') as f:
-                    classifier_config = json.load(f)
-                print(f"   [Config] Classifier config: {classifier_config}")
+                # Extract encoder weights (keys starting with 'encoder.')
+                encoder_state = {k.replace('encoder.', ''): v
+                                for k, v in full_state_dict.items()
+                                if k.startswith('encoder.')}
+                if encoder_state:
+                    teacher.encoder.load_state_dict(encoder_state)
+                    print(f"   [Encoder] Loaded {len(encoder_state)} weight tensors")
+
+                # Extract classifier weights (keys starting with 'classifier.')
+                classifier_state = {k.replace('classifier.', ''): v
+                                   for k, v in full_state_dict.items()
+                                   if k.startswith('classifier.')}
+                if classifier_state:
+                    teacher.classifier.load_state_dict(classifier_state)
+                    print(f"   [Classifier] Loaded {len(classifier_state)} weight tensors")
+                    loaded_weights = True
+
+            # Method 2: Load from classifier_head.pt (classifier only)
+            if not loaded_weights:
+                classifier_head_path = os.path.join(local_dir, 'classifier_head.pt')
+                if os.path.exists(classifier_head_path):
+                    print(f"   [Weights] Loading from classifier_head.pt...")
+                    classifier_weights = torch.load(classifier_head_path, map_location='cpu')
+
+                    # Handle nested format: {'classifier': state_dict}
+                    if 'classifier' in classifier_weights:
+                        teacher.classifier.load_state_dict(classifier_weights['classifier'])
+                        print(f"   [Classifier] Loaded from nested 'classifier' key")
+                    else:
+                        teacher.classifier.load_state_dict(classifier_weights)
+                        print(f"   [Classifier] Loaded directly")
+                    loaded_weights = True
+
+            if not loaded_weights:
+                print(f"   [Warning] No classifier weights found!")
 
             teacher = teacher.to(device)
+            print("   [OK] Teacher loaded successfully!")
 
         except Exception as e:
-            print(f"   [Warning] Custom format loading failed: {e}")
-            print("   [Fallback] Trying AutoModelForSequenceClassification...")
+            print(f"   [Error] Loading failed: {e}")
+            import traceback
+            traceback.print_exc()
+            raise RuntimeError(f"Failed to load teacher from {config.teacher_checkpoint}: {e}")
 
-            try:
-                from transformers import AutoModelForSequenceClassification
-
-                hf_model = AutoModelForSequenceClassification.from_pretrained(
-                    config.teacher_checkpoint,
-                    num_labels=num_labels,
-                    ignore_mismatched_sizes=True
-                )
-
-                teacher = TeacherModel(
-                    model_name=config.teacher_checkpoint,
-                    num_labels=num_labels,
-                    dropout=config.dropout
-                )
-
-                # Copy encoder weights
-                if hasattr(hf_model, 'roberta'):
-                    teacher.encoder.load_state_dict(hf_model.roberta.state_dict())
-                    print("   [Encoder] Loaded from roberta attribute")
-                elif hasattr(hf_model, 'bert'):
-                    teacher.encoder.load_state_dict(hf_model.bert.state_dict())
-                    print("   [Encoder] Loaded from bert attribute")
-
-                del hf_model
-                torch.cuda.empty_cache()
-                teacher = teacher.to(device)
-
-            except Exception as e2:
-                print(f"   [Error] All loading methods failed: {e2}")
-                print("   [Fallback] Creating fresh TeacherModel...")
-                teacher = TeacherModel(
-                    model_name=config.teacher_checkpoint,
-                    num_labels=num_labels,
-                    dropout=config.dropout
-                ).to(device)
-
-        print("   [OK] Teacher loaded successfully!")
         if logger:
             logger.info(f"Loaded pre-trained teacher from {config.teacher_checkpoint}")
         return teacher, tokenizer, training_metrics
