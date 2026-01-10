@@ -78,7 +78,13 @@ def parse_compression_arguments(args_list: Optional[List[str]] = None):
     # Required
     parser.add_argument('--dataset_path', type=str, required=True)
     parser.add_argument('--author_name', type=str, required=True)
-    
+
+    # Label Configuration
+    parser.add_argument('--label_columns', type=str, nargs='+', default=LABEL_COLUMNS,
+                       help='List of label columns in the dataset (default: bully, sexual, religious, threat, spam)')
+    parser.add_argument('--label_priority', type=str, default=None,
+                       help='JSON string of label priorities for weighted metrics (e.g. \'{"threat": 3, "sexual": 2}\')')
+
     # Pipeline
     parser.add_argument('--pipeline', type=str, default='kd_only',
                        choices=list(PIPELINE_CONFIGS.keys()))
@@ -99,6 +105,10 @@ def parse_compression_arguments(args_list: Optional[List[str]] = None):
     parser.add_argument('--epochs', type=int, default=15)
     parser.add_argument('--max_length', type=int, default=128)
     parser.add_argument('--num_folds', type=int, default=5)
+    parser.add_argument('--run_full_kfold', action='store_true',
+                       help='Run all K folds and report mean/std metrics (slower but more robust)')
+    parser.add_argument('--data_fraction', type=float, default=1.0,
+                       help='Fraction of data to use (0.0-1.0). Use smaller values for quick testing.')
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--dropout', type=float, default=0.1)
     parser.add_argument('--weight_decay', type=float, default=0.01)
@@ -142,6 +152,8 @@ def parse_compression_arguments(args_list: Optional[List[str]] = None):
     parser.add_argument('--quant_dtype', type=str, default='int8',
                        choices=['int8', 'int4', 'fp16'])
     parser.add_argument('--quant_calibration_batches', type=int, default=100)
+    parser.add_argument('--latency_batch_size', type=int, default=1,
+                       help='Batch size for latency measurement (default: 1 for realistic inference)')
     
     # Output
     parser.add_argument('--output_dir', type=str, default='./compressed_models')
@@ -154,6 +166,23 @@ def parse_compression_arguments(args_list: Optional[List[str]] = None):
                        default=list(PIPELINE_CONFIGS.keys()))
     
     args = parser.parse_args(args_list)
+
+    # Parse label_priority if provided
+    if args.label_priority:
+        try:
+            args.label_priority = json.loads(args.label_priority)
+        except json.JSONDecodeError:
+            print(f"Warning: Could not parse label_priority JSON: {args.label_priority}")
+            args.label_priority = {col: 1 for col in args.label_columns}
+    else:
+        # Default: equal priority (weight=1) for all labels
+        args.label_priority = {col: 1 for col in args.label_columns}
+
+    # Validate data_fraction
+    if args.data_fraction <= 0 or args.data_fraction > 1:
+        print(f"Warning: data_fraction must be in (0, 1]. Setting to 1.0")
+        args.data_fraction = 1.0
+
     _apply_pipeline_config(args)
     return args
 
@@ -189,21 +218,33 @@ def get_config_for_pipeline(pipeline: str, **overrides):
 def print_compression_config(config):
     """Print configuration summary."""
     print("\n" + "="*70)
-    print("🔧 COMPRESSION CONFIGURATION")
+    print("COMPRESSION CONFIGURATION")
     print("="*70)
-    
+
     pipeline_desc = PIPELINE_CONFIGS.get(config.pipeline, {}).get('description', '')
-    print(f"\n📊 Pipeline: {config.pipeline.upper()}")
+    print(f"\n[Pipeline]: {config.pipeline.upper()}")
     print(f"   {pipeline_desc}")
+
+    # Data configuration
+    print(f"\n[Data]:")
+    print(f"   Labels: {config.label_columns}")
+    if hasattr(config, 'data_fraction') and config.data_fraction < 1.0:
+        print(f"   Data Fraction: {config.data_fraction*100:.0f}%")
+    if hasattr(config, 'label_priority'):
+        non_default = {k: v for k, v in config.label_priority.items() if v != 1}
+        if non_default:
+            print(f"   Priority Labels: {non_default}")
+    if hasattr(config, 'run_full_kfold') and config.run_full_kfold:
+        print(f"   K-Fold Mode: Full (all {config.num_folds} folds)")
     
     # Show what will happen
-    print(f"\n📋 COMPRESSION FLOW:")
+    print(f"\n[Compression Flow]:")
     if config.pipeline == 'baseline':
-        print("   Teacher → Evaluate → Done")
+        print("   Teacher -> Evaluate -> Done")
     else:
         flow = ["Teacher"]
         if config.enable_kd:
-            flow.append("KD → Student")
+            flow.append("KD -> Student")
         if config.enable_pruning:
             target = "Student" if config.enable_kd else "Teacher"
             flow.append(f"Prune {target}")
@@ -212,29 +253,30 @@ def print_compression_config(config):
         if config.enable_quantization:
             flow.append("Quantize")
         flow.append("Final Model")
-        print("   " + " → ".join(flow))
-    
-    print(f"\n🎓 Teacher: {config.teacher_path}")
+        print("   " + " -> ".join(flow))
+
+    print(f"\n[Teacher]: {config.teacher_path}")
     if config.teacher_checkpoint:
         print(f"   Using checkpoint: {config.teacher_checkpoint} (skip training!)")
-    
+
     if config.enable_kd:
-        print(f"\n📚 Student: {config.student_path}")
+        print(f"\n[Student]: {config.student_path}")
         print(f"   KD Method: {config.kd_method}")
         print(f"   Alpha: {config.kd_alpha}, Temperature: {config.kd_temperature}")
-    
+
     if config.enable_pruning:
-        print(f"\n✂️  Pruning:")
+        print(f"\n[Pruning]:")
         print(f"   Method: {config.prune_method}")
         print(f"   Sparsity: {config.prune_sparsity*100:.0f}%")
         print(f"   Fine-tune after: {'Yes' if config.fine_tune_after_prune else 'No'}")
-    
+
     if config.enable_quantization:
-        print(f"\n📉 Quantization:")
+        print(f"\n[Quantization]:")
         print(f"   Method: {config.quant_method}")
+        print(f"   Latency batch size: {config.latency_batch_size}")
         if config.quant_method in ['dynamic', 'static']:
-            print(f"   ⚠️  Note: {config.quant_method} runs on CPU only")
+            print(f"   Note: {config.quant_method} runs on CPU only")
         elif config.quant_method == 'int4':
-            print(f"   ⚠️  Note: Requires bitsandbytes library")
-    
+            print(f"   Note: Requires bitsandbytes library")
+
     print("="*70 + "\n")

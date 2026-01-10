@@ -53,27 +53,37 @@ LABEL_COLUMNS = ['bully', 'sexual', 'religious', 'threat', 'spam']
 # CACHING FUNCTIONS (Merged from your previous codebase!)
 # =============================================================================
 
-def get_cache_filename(model_path: str, max_length: int) -> str:
+def get_cache_filename(model_path: str, max_length: int, student_model_path: Optional[str] = None) -> str:
     """
-    Generate a unique cache filename based on model and max_length.
-    
+    Generate a unique cache filename based on model(s) and max_length.
+
     WHAT: Creates a filename like "csebuetnlp_banglabert_maxlen128_tokenized.pkl"
+          or with student: "csebuetnlp_banglabert_DUAL_distilbert_maxlen128_tokenized.pkl"
     WHY: Different models have different tokenizers, so cache must be separate
     HOW: Replace special characters in model path, append max_length
-    
+
     Args:
-        model_path: HuggingFace model path (e.g., "csebuetnlp/banglabert")
+        model_path: HuggingFace model path for teacher (e.g., "csebuetnlp/banglabert")
         max_length: Maximum sequence length
-    
+        student_model_path: Optional HuggingFace model path for student (for dual tokenization)
+
     Returns:
         Safe filename string
-    
+
     Example:
         >>> get_cache_filename("csebuetnlp/banglabert", 128)
         'csebuetnlp_banglabert_maxlen128_tokenized.pkl'
+        >>> get_cache_filename("csebuetnlp/banglabert", 128, "distilbert-base-multilingual-cased")
+        'csebuetnlp_banglabert_DUAL_distilbert_base_multilingual_cased_maxlen128_tokenized.pkl'
     """
     # Replace characters that can't be in filenames
     safe_name = model_path.replace('/', '_').replace('-', '_').replace('.', '_')
+
+    # If student model provided, add it to filename for dual tokenization cache
+    if student_model_path:
+        safe_student_name = student_model_path.replace('/', '_').replace('-', '_').replace('.', '_')
+        return f"{safe_name}_DUAL_{safe_student_name}_maxlen{max_length}_tokenized.pkl"
+
     return f"{safe_name}_maxlen{max_length}_tokenized.pkl"
 
 
@@ -82,70 +92,92 @@ def get_or_create_tokenized_dataset(
     labels: np.ndarray,
     tokenizer,
     max_length: int,
-    cache_dir: str = './cache'
+    cache_dir: str = './cache',
+    student_tokenizer=None
 ) -> Dict[str, torch.Tensor]:
     """
     Tokenize all samples ONCE and cache them.
-    
+
     WHAT: Converts text to token IDs, with intelligent caching
     WHY: Tokenization is slow; we only want to do it once
-    HOW: Check cache → If exists, load; else tokenize and save
-    
+    HOW: Check cache -> If exists, load; else tokenize and save
+
     This is the MAIN FUNCTION for data preparation!
-    
+
+    DUAL TOKENIZATION (for Knowledge Distillation):
+    When student_tokenizer is provided, we tokenize with BOTH tokenizers.
+    This is necessary because teacher and student may have different vocabularies.
+
     Args:
         comments: Array of text strings
         labels: Array of label arrays (multi-label)
-        tokenizer: HuggingFace tokenizer
+        tokenizer: HuggingFace tokenizer (for teacher model)
         max_length: Maximum sequence length
         cache_dir: Directory to store cache files
-    
+        student_tokenizer: Optional HuggingFace tokenizer for student model
+
     Returns:
         Dictionary with:
-        - 'input_ids': Tensor of shape [num_samples, max_length]
+        - 'input_ids': Tensor of shape [num_samples, max_length] (teacher tokens)
         - 'attention_mask': Tensor of shape [num_samples, max_length]
         - 'labels': Tensor of shape [num_samples, num_labels]
-    
+        - 'student_input_ids': (if student_tokenizer provided) Tensor [num_samples, max_length]
+        - 'student_attention_mask': (if student_tokenizer provided) Tensor [num_samples, max_length]
+
     Example:
+        # Single tokenization (teacher only)
         tokenized = get_or_create_tokenized_dataset(
             comments, labels, tokenizer, max_length=128
         )
-        # First run: ~90 seconds (tokenizing)
-        # Second run: ~2 seconds (loading cache)
+
+        # Dual tokenization (for KD)
+        tokenized = get_or_create_tokenized_dataset(
+            comments, labels, teacher_tokenizer, max_length=128,
+            student_tokenizer=student_tokenizer
+        )
     """
     # Create cache directory if needed
     os.makedirs(cache_dir, exist_ok=True)
-    
-    # Generate cache filename
-    cache_filename = get_cache_filename(tokenizer.name_or_path, max_length)
+
+    # Generate cache filename (includes student if dual tokenization)
+    student_path = student_tokenizer.name_or_path if student_tokenizer else None
+    cache_filename = get_cache_filename(tokenizer.name_or_path, max_length, student_path)
     cache_path = os.path.join(cache_dir, cache_filename)
-    
+
     # Try to load from cache
     if os.path.exists(cache_path):
-        print(f"✅ Loading tokenized data from cache: {cache_path}")
+        print(f"Loading tokenized data from cache: {cache_path}")
         cached_data = torch.load(cache_path)
-        
+
         # Verify cache matches current data
         if cached_data['input_ids'].shape[0] == len(comments):
-            print(f"   Loaded {len(comments)} samples in ~2 seconds")
-            return cached_data
+            # Check if we need student tokens but cache doesn't have them
+            if student_tokenizer and 'student_input_ids' not in cached_data:
+                print("  Cache missing student tokens! Re-tokenizing...")
+            else:
+                print(f"   Loaded {len(comments)} samples in ~2 seconds")
+                return cached_data
         else:
-            print(f"⚠️  Cache size mismatch! Re-tokenizing...")
-    
+            print(f"Warning: Cache size mismatch! Re-tokenizing...")
+
     # No cache or invalid - need to tokenize
-    print(f"🔄 Tokenizing {len(comments)} samples...")
-    print(f"   Model: {tokenizer.name_or_path}")
+    print(f"Tokenizing {len(comments)} samples...")
+    print(f"   Teacher Model: {tokenizer.name_or_path}")
+    if student_tokenizer:
+        print(f"   Student Model: {student_tokenizer.name_or_path}")
     print(f"   Max length: {max_length}")
-    
+
     # Tokenize all samples
     all_input_ids = []
     all_attention_masks = []
-    
+    all_student_input_ids = []
+    all_student_attention_masks = []
+
     for comment in tqdm(comments, desc="Tokenizing"):
         # Handle None or non-string values
         text = str(comment) if comment is not None else ""
-        
-        # Tokenize
+
+        # Tokenize with teacher tokenizer
         encoding = tokenizer(
             text,
             truncation=True,
@@ -153,22 +185,39 @@ def get_or_create_tokenized_dataset(
             max_length=max_length,
             return_tensors='pt'
         )
-        
+
         all_input_ids.append(encoding['input_ids'].squeeze(0))
         all_attention_masks.append(encoding['attention_mask'].squeeze(0))
-    
+
+        # Tokenize with student tokenizer if provided
+        if student_tokenizer:
+            student_encoding = student_tokenizer(
+                text,
+                truncation=True,
+                padding='max_length',
+                max_length=max_length,
+                return_tensors='pt'
+            )
+            all_student_input_ids.append(student_encoding['input_ids'].squeeze(0))
+            all_student_attention_masks.append(student_encoding['attention_mask'].squeeze(0))
+
     # Stack into tensors
     tokenized_data = {
         'input_ids': torch.stack(all_input_ids),
         'attention_mask': torch.stack(all_attention_masks),
         'labels': torch.tensor(labels, dtype=torch.float32)
     }
-    
+
+    # Add student tokens if dual tokenization
+    if student_tokenizer:
+        tokenized_data['student_input_ids'] = torch.stack(all_student_input_ids)
+        tokenized_data['student_attention_mask'] = torch.stack(all_student_attention_masks)
+
     # Save to cache
     torch.save(tokenized_data, cache_path)
-    print(f"✅ Saved tokenized data to cache: {cache_path}")
+    print(f"Saved tokenized data to cache: {cache_path}")
     print(f"   Cache size: {os.path.getsize(cache_path) / 1024 / 1024:.1f} MB")
-    
+
     return tokenized_data
 
 
@@ -179,46 +228,64 @@ def get_or_create_tokenized_dataset(
 class IndexedDataset(Dataset):
     """
     Dataset that indexes into pre-tokenized data.
-    
+
     WHAT: A PyTorch Dataset that uses indices to access cached tokenized data
     WHY: Allows different train/val splits without re-tokenizing
     HOW: Stores full tokenized data + indices for this split
-    
+
     This is used AFTER tokenization caching.
-    
+
+    Supports DUAL TOKENIZATION for Knowledge Distillation:
+    If tokenized_data contains 'student_input_ids' and 'student_attention_mask',
+    they will be included in the returned batch.
+
     Example:
         # Tokenize full dataset once
         full_data = get_or_create_tokenized_dataset(...)
-        
+
         # Create train/val datasets using indices
         train_dataset = IndexedDataset(full_data, train_indices)
         val_dataset = IndexedDataset(full_data, val_indices)
     """
-    
+
     def __init__(self, tokenized_data: Dict[str, torch.Tensor], indices: np.ndarray):
         """
         Initialize indexed dataset.
-        
+
         Args:
             tokenized_data: Dict with 'input_ids', 'attention_mask', 'labels'
+                           and optionally 'student_input_ids', 'student_attention_mask'
             indices: Array of indices to include in this dataset
         """
         self.input_ids = tokenized_data['input_ids']
         self.attention_mask = tokenized_data['attention_mask']
         self.labels = tokenized_data['labels']
         self.indices = indices
-    
+
+        # Optional student tokens for dual tokenization (KD)
+        self.student_input_ids = tokenized_data.get('student_input_ids')
+        self.student_attention_mask = tokenized_data.get('student_attention_mask')
+        self.has_student_tokens = self.student_input_ids is not None
+
     def __len__(self) -> int:
         return len(self.indices)
-    
+
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
         """Get a single sample by index."""
         real_idx = self.indices[idx]
-        return {
+
+        item = {
             'input_ids': self.input_ids[real_idx],
             'attention_mask': self.attention_mask[real_idx],
             'labels': self.labels[real_idx]
         }
+
+        # Add student tokens if available
+        if self.has_student_tokens:
+            item['student_input_ids'] = self.student_input_ids[real_idx]
+            item['student_attention_mask'] = self.student_attention_mask[real_idx]
+
+        return item
 
 
 class CyberbullyingDataset(Dataset):
@@ -267,74 +334,85 @@ class CyberbullyingDataset(Dataset):
 # DATA LOADING AND PREPROCESSING
 # =============================================================================
 
-def load_and_preprocess_data(dataset_path: str) -> Tuple[np.ndarray, np.ndarray]:
+def load_and_preprocess_data(
+    dataset_path: str,
+    label_columns: Optional[List[str]] = None
+) -> Tuple[np.ndarray, np.ndarray, Dict[str, Dict[int, int]]]:
     """
     Load and preprocess the cyberbullying dataset.
-    
+
     WHAT: Reads CSV file and extracts comments + labels
     WHY: Standardizes data loading across all experiments
-    HOW: Read CSV → Validate columns → Extract arrays → Print stats
-    
+    HOW: Read CSV -> Validate columns -> Extract arrays -> Print stats
+
     Args:
         dataset_path: Path to CSV file
-    
+        label_columns: Optional list of label column names (defaults to LABEL_COLUMNS)
+
     Returns:
-        Tuple of (comments array, labels array)
-    
+        Tuple of (comments array, labels array, label_distribution dict)
+
     Expected CSV format:
         comment,bully,sexual,religious,threat,spam
         "some text",0,1,0,0,0
         "other text",1,0,0,1,0
     """
-    print(f"\n📁 Loading dataset: {dataset_path}")
-    
+    # Use default label columns if not provided
+    if label_columns is None:
+        label_columns = LABEL_COLUMNS
+
+    print(f"\nLoading dataset: {dataset_path}")
+
     # Load CSV
     df = pd.read_csv(dataset_path)
     print(f"   Raw rows: {len(df)}")
-    
+
     # Remove demographic columns if present (not used for classification)
     columns_to_drop = [col for col in ['Gender', 'Profession'] if col in df.columns]
     if columns_to_drop:
         df = df.drop(columns_to_drop, axis=1)
         print(f"   Dropped columns: {columns_to_drop}")
-    
+
     # Validate label columns exist
-    missing_labels = [col for col in LABEL_COLUMNS if col not in df.columns]
+    missing_labels = [col for col in label_columns if col not in df.columns]
     if missing_labels:
         raise ValueError(f"Missing label columns: {missing_labels}\n"
-                        f"Expected: {LABEL_COLUMNS}\n"
+                        f"Expected: {label_columns}\n"
                         f"Found: {df.columns.tolist()}")
-    
+
     # Validate comment column exists
     if 'comment' not in df.columns:
         # Try common alternatives
-        for alt in ['text', 'Comment', 'Text', 'content', 'Content']:
+        for alt in ['text', 'Comment', 'Text', 'content', 'Content', 'comments', 'Comments']:
             if alt in df.columns:
                 df = df.rename(columns={alt: 'comment'})
                 print(f"   Renamed '{alt}' to 'comment'")
                 break
         else:
             raise ValueError("No 'comment' column found in dataset")
-    
+
     # Handle missing values
     df = df.dropna(subset=['comment'])
     print(f"   After dropping NA: {len(df)} rows")
-    
+
     # Extract data
     comments = df['comment'].values
-    labels = df[LABEL_COLUMNS].values
-    
-    # Print statistics
-    print(f"\n📊 Dataset Statistics:")
+    labels = df[label_columns].values
+
+    # Calculate label distribution
+    label_distribution = {}
+    print(f"\nDataset Statistics:")
     print(f"   Total samples: {len(comments)}")
-    print(f"   Label columns: {LABEL_COLUMNS}")
+    print(f"   Label columns: {label_columns}")
     print(f"\n   Label distribution:")
-    
-    for i, col in enumerate(LABEL_COLUMNS):
-        positive = np.sum(labels[:, i])
+
+    for i, col in enumerate(label_columns):
+        positive = int(np.sum(labels[:, i]))
+        negative = len(labels) - positive
         percentage = (positive / len(labels)) * 100
-        print(f"      {col}: {int(positive)}/{len(labels)} ({percentage:.1f}% positive)")
-    
+        print(f"      {col}: {positive}/{len(labels)} ({percentage:.1f}% positive)")
+        label_distribution[col] = {0: negative, 1: positive}
+
     # Multi-label statistics
     labels_per_sample = np.sum(labels, axis=1)
     print(f"\n   Multi-label statistics:")
@@ -342,8 +420,8 @@ def load_and_preprocess_data(dataset_path: str) -> Tuple[np.ndarray, np.ndarray]
     print(f"      Samples with 1 label: {np.sum(labels_per_sample == 1)}")
     print(f"      Samples with 2+ labels: {np.sum(labels_per_sample >= 2)}")
     print(f"      Average labels per sample: {np.mean(labels_per_sample):.2f}")
-    
-    return comments, labels
+
+    return comments, labels, label_distribution
 
 
 # =============================================================================
@@ -356,134 +434,164 @@ def prepare_kfold_splits(
     num_folds: int = 5,
     stratification_type: str = 'multilabel',
     seed: int = 42
-) -> Generator[Tuple[np.ndarray, np.ndarray], None, None]:
+) -> List[Tuple[np.ndarray, np.ndarray]]:
     """
     Prepare K-fold cross-validation splits.
-    
+
     WHAT: Divides data into K training/validation splits
     WHY: Cross-validation gives more reliable performance estimates
     HOW: Choose stratification method based on data type
-    
+
+    SPECIAL CASE: num_folds=1
+    When num_folds=1, creates a single 80/20 train/val split (not K-fold).
+    This is useful for quick testing or when you want a simple holdout split.
+
     Stratification Types:
     1. 'multilabel': Uses MultilabelStratifiedKFold (best for multi-label)
        - Ensures each fold has similar label distribution
        - Requires: pip install iterative-stratification
-    
+
     2. 'multiclass': Uses StratifiedKFold on primary label
        - Fallback when multilabel stratification unavailable
        - Less accurate but still better than random
-    
+
     3. 'none': Uses basic KFold (random splits)
        - No stratification
        - May have imbalanced folds
-    
+
     Args:
         comments: Array of text samples
         labels: Array of multi-label arrays
-        num_folds: Number of folds (typically 5)
+        num_folds: Number of folds (typically 5). Use 1 for single 80/20 split.
         stratification_type: 'multilabel', 'multiclass', or 'none'
         seed: Random seed for reproducibility
-    
-    Yields:
-        Tuples of (train_indices, val_indices)
-    
+
+    Returns:
+        List of tuples (train_indices, val_indices)
+
     Example:
         splits = prepare_kfold_splits(comments, labels, num_folds=5)
         for fold, (train_idx, val_idx) in enumerate(splits):
             print(f"Fold {fold}: {len(train_idx)} train, {len(val_idx)} val")
     """
-    print(f"\n🔀 Preparing {num_folds}-fold cross-validation...")
-    
+    # Special case: single split (80/20)
+    if num_folds == 1:
+        print(f"\nPreparing single 80/20 train/val split...")
+        n_samples = len(comments)
+        indices = np.arange(n_samples)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+
+        split_point = int(0.8 * n_samples)
+        train_idx = indices[:split_point]
+        val_idx = indices[split_point:]
+
+        print(f"   Train: {len(train_idx)} samples ({len(train_idx)/n_samples*100:.1f}%)")
+        print(f"   Val: {len(val_idx)} samples ({len(val_idx)/n_samples*100:.1f}%)")
+
+        return [(train_idx, val_idx)]
+
+    print(f"\nPreparing {num_folds}-fold cross-validation...")
+
     # Try multilabel stratification first
     if stratification_type == 'multilabel':
         try:
             from iterstrat.ml_stratifiers import MultilabelStratifiedKFold
             print(f"   Using MultilabelStratifiedKFold (best for multi-label)")
             kfold = MultilabelStratifiedKFold(
-                n_splits=num_folds, 
-                shuffle=True, 
+                n_splits=num_folds,
+                shuffle=True,
                 random_state=seed
             )
-            return kfold.split(comments, labels)
-        
+            return list(kfold.split(comments, labels))
+
         except ImportError:
-            print("   ⚠️  iterative-stratification not installed!")
+            print("   Warning: iterative-stratification not installed!")
             print("      Install: pip install iterative-stratification")
             print("      Falling back to multiclass stratification...")
             stratification_type = 'multiclass'
-    
+
     # Multiclass stratification (use primary label)
     if stratification_type == 'multiclass':
         print(f"   Using StratifiedKFold on primary label")
-        
+
         # Create single-label version (priority: threat > sexual > religious > bully > spam)
         primary_labels = np.zeros(len(labels), dtype=int)
         for i in range(len(labels)):
-            if labels[i, 3] == 1:      # threat
+            if labels.shape[1] > 3 and labels[i, 3] == 1:      # threat
                 primary_labels[i] = 4
-            elif labels[i, 1] == 1:    # sexual
+            elif labels.shape[1] > 1 and labels[i, 1] == 1:    # sexual
                 primary_labels[i] = 3
-            elif labels[i, 2] == 1:    # religious
+            elif labels.shape[1] > 2 and labels[i, 2] == 1:    # religious
                 primary_labels[i] = 2
-            elif labels[i, 0] == 1:    # bully
+            elif labels.shape[1] > 0 and labels[i, 0] == 1:    # bully
                 primary_labels[i] = 1
-            elif labels[i, 4] == 1:    # spam
+            elif labels.shape[1] > 4 and labels[i, 4] == 1:    # spam
                 primary_labels[i] = 5
             else:
                 primary_labels[i] = 0  # no label
-        
+
         kfold = StratifiedKFold(n_splits=num_folds, shuffle=True, random_state=seed)
-        return kfold.split(comments, primary_labels)
-    
+        return list(kfold.split(comments, primary_labels))
+
     # No stratification (random splits)
     print(f"   Using basic KFold (no stratification)")
     kfold = KFold(n_splits=num_folds, shuffle=True, random_state=seed)
-    return kfold.split(comments)
+    return list(kfold.split(comments))
 
 
 # =============================================================================
 # CLASS WEIGHTS
 # =============================================================================
 
-def calculate_class_weights(labels: np.ndarray) -> torch.Tensor:
+def calculate_class_weights(
+    labels: np.ndarray,
+    label_columns: Optional[List[str]] = None
+) -> torch.Tensor:
     """
     Calculate class weights for imbalanced data.
-    
+
     WHAT: Computes weight for each label based on class frequency
     WHY: Rare classes (like 'threat') should have higher loss weight
     HOW: weight = negative_count / positive_count
-    
+
     For multi-label classification, each label is an independent binary
     classification problem, so we calculate weights per label.
-    
+
     Args:
         labels: Array of shape [num_samples, num_labels]
-    
+        label_columns: Optional list of label column names for logging
+
     Returns:
         Tensor of weights [num_labels]
-    
+
     Example:
         If 'threat' has 500 positive and 12000 negative samples:
         weight = 12000 / 500 = 24.0
-        
+
         This means a false negative on 'threat' is penalized 24x more
         than a false positive, helping the model not ignore rare classes.
     """
     if isinstance(labels, torch.Tensor):
         labels = labels.numpy()
-    
+
+    # Use default label columns if not provided
+    if label_columns is None:
+        label_columns = LABEL_COLUMNS
+
     # Count positives and negatives per label
     pos_counts = np.sum(labels, axis=0)
     neg_counts = len(labels) - pos_counts
-    
+
     # Calculate weights (avoid division by zero)
     weights = np.where(pos_counts > 0, neg_counts / pos_counts, 1.0)
-    
-    print("\n⚖️  Class weights (for imbalanced data):")
-    for i, col in enumerate(LABEL_COLUMNS):
-        print(f"      {col}: {weights[i]:.2f} "
+
+    print("\nClass weights (for imbalanced data):")
+    for i in range(len(weights)):
+        col_name = label_columns[i] if i < len(label_columns) else f"label_{i}"
+        print(f"      {col_name}: {weights[i]:.2f} "
               f"({int(pos_counts[i])} pos, {int(neg_counts[i])} neg)")
-    
+
     return torch.FloatTensor(weights)
 
 
@@ -534,7 +642,7 @@ def create_data_loaders(
         pin_memory=True
     )
     
-    print(f"\n📦 DataLoaders created:")
+    print(f"\nDataLoaders created:")
     print(f"      Train: {len(train_dataset)} samples, {len(train_loader)} batches")
     print(f"      Val: {len(val_dataset)} samples, {len(val_loader)} batches")
     

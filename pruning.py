@@ -100,7 +100,7 @@ class PruningManager:
         # Find prunable modules
         self.prunable_modules = self._get_prunable_modules()
         
-        print(f"\n✂️  PruningManager initialized:")
+        print(f"\n[Pruning] PruningManager initialized:")
         print(f"   Target sparsity: {target_sparsity * 100:.1f}%")
         print(f"   Prunable modules: {len(self.prunable_modules)}")
         print(f"   Layer filter: {prune_layers}")
@@ -212,7 +212,7 @@ class PruningManager:
                 prune.l1_unstructured(module, param_name, amount=sparsity)
         
         self.current_sparsity = self.get_sparsity()['overall']
-        print(f"   ✅ Applied magnitude pruning: {self.current_sparsity*100:.2f}% sparsity")
+        print(f"   [OK] Applied magnitude pruning: {self.current_sparsity*100:.2f}% sparsity")
     
     def make_pruning_permanent(self):
         """
@@ -228,7 +228,7 @@ class PruningManager:
             if prune.is_pruned(module):
                 prune.remove(module, param_name)
         
-        print("   ✅ Pruning made permanent (masks applied to weights)")
+        print("   [OK] Pruning made permanent (masks applied to weights)")
 
 
 # =============================================================================
@@ -522,7 +522,7 @@ class WandaPruner(PruningManager):
             if activation_counts[name] > 0:
                 self.activation_norms[name] = activation_sums[name] / activation_counts[name]
         
-        print(f"   ✅ Collected activations for {len(self.activation_norms)} layers")
+        print(f"   [OK] Collected activations for {len(self.activation_norms)} layers")
     
     def apply_wanda_pruning(self):
         """
@@ -568,7 +568,7 @@ class WandaPruner(PruningManager):
             layer_info.append((name, module, importance.shape))
         
         if not all_importance_scores:
-            print("   ⚠️  No importance scores computed!")
+            print("   [WARN] No importance scores computed!")
             return
         
         # Calculate global threshold
@@ -589,7 +589,7 @@ class WandaPruner(PruningManager):
             score_idx += 1
         
         self.current_sparsity = self.get_sparsity()['overall']
-        print(f"   ✅ Applied Wanda pruning: {self.current_sparsity*100:.2f}% sparsity")
+        print(f"   [OK] Applied Wanda pruning: {self.current_sparsity*100:.2f}% sparsity")
 
 
 # =============================================================================
@@ -720,97 +720,167 @@ def fine_tune_after_pruning(
     train_loader,
     val_loader,
     config,
-    device: str
+    device: str,
+    use_student_input_ids: bool = False
 ) -> Dict:
     """
     Fine-tune model after pruning to recover accuracy.
-    
+
     WHAT: Continue training the pruned model for a few epochs
     WHY: Pruning hurts accuracy; fine-tuning helps recover
     HOW: Standard training loop with lower learning rate
-    
+
     Args:
         model: Pruned model
         train_loader: Training dataloader
         val_loader: Validation dataloader
         config: Training configuration
         device: Device to train on
-    
+        use_student_input_ids: If True, use student_input_ids from batch
+                               (for models that were trained with student tokenizer)
+
     Returns:
-        Dict with fine-tuning metrics
+        Dict with detailed fine-tuning metrics including:
+        - best_f1: Best validation F1 achieved
+        - best_epoch: Epoch with best F1
+        - final_f1: F1 at final epoch
+        - final_loss: Loss at final epoch
+        - epoch_history: List of dicts with per-epoch metrics
     """
     from torch.optim import AdamW
     from transformers import get_linear_schedule_with_warmup
-    from sklearn.metrics import f1_score
-    
-    print(f"\n🔧 Fine-tuning pruned model for {config.fine_tune_epochs} epochs...")
-    
+    from sklearn.metrics import f1_score, precision_score, recall_score
+
+    print(f"\n[Fine-tune] Fine-tuning pruned model for {config.fine_tune_epochs} epochs...")
+
     model.train()
-    
+
     # Use lower learning rate for fine-tuning
     optimizer = AdamW(
         filter(lambda p: p.requires_grad, model.parameters()),
         lr=config.lr * 0.1,  # 10x lower than initial training
         weight_decay=config.weight_decay
     )
-    
+
     total_steps = len(train_loader) * config.fine_tune_epochs
     scheduler = get_linear_schedule_with_warmup(
         optimizer,
         num_warmup_steps=int(0.1 * total_steps),
         num_training_steps=total_steps
     )
-    
+
     loss_fn = nn.BCEWithLogitsLoss()
+
+    # Tracking metrics
     best_f1 = 0
-    
+    best_epoch = 0
+    best_metrics = {}
+    epoch_history = []
+
     for epoch in range(config.fine_tune_epochs):
         model.train()
         total_loss = 0
-        
+        num_batches = 0
+
         for batch in tqdm(train_loader, desc=f'Fine-tune Epoch {epoch+1}'):
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
+            # Handle dual tokenization - use student tokens if specified
+            if use_student_input_ids and 'student_input_ids' in batch:
+                input_ids = batch['student_input_ids'].to(device)
+                attention_mask = batch['student_attention_mask'].to(device)
+            else:
+                input_ids = batch['input_ids'].to(device)
+                attention_mask = batch['attention_mask'].to(device)
+
             labels = batch['labels'].to(device)
-            
+
             optimizer.zero_grad()
             outputs = model(input_ids, attention_mask)
             loss = loss_fn(outputs['logits'], labels)
             loss.backward()
-            
+
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_norm)
             optimizer.step()
             scheduler.step()
-            
+
             total_loss += loss.item()
-        
+            num_batches += 1
+
+        avg_train_loss = total_loss / num_batches if num_batches > 0 else 0
+
         # Evaluate
         model.eval()
         all_preds = []
         all_labels = []
-        
+        val_loss = 0
+        val_batches = 0
+
         with torch.no_grad():
             for batch in val_loader:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels']
-                
+                # Handle dual tokenization for validation
+                if use_student_input_ids and 'student_input_ids' in batch:
+                    input_ids = batch['student_input_ids'].to(device)
+                    attention_mask = batch['student_attention_mask'].to(device)
+                else:
+                    input_ids = batch['input_ids'].to(device)
+                    attention_mask = batch['attention_mask'].to(device)
+
+                labels_batch = batch['labels'].to(device)
+
                 outputs = model(input_ids, attention_mask)
+
+                # Calculate validation loss
+                batch_loss = loss_fn(outputs['logits'], labels_batch)
+                val_loss += batch_loss.item()
+                val_batches += 1
+
                 preds = (torch.sigmoid(outputs['logits']) > 0.5).cpu().numpy()
-                
+
                 all_preds.extend(preds)
-                all_labels.extend(labels.numpy())
-        
-        f1 = f1_score(all_labels, all_preds, average='macro')
-        
-        print(f"   Epoch {epoch+1}: Loss={total_loss/len(train_loader):.4f}, F1={f1:.4f}")
-        
-        if f1 > best_f1:
-            best_f1 = f1
-    
-    print(f"   ✅ Fine-tuning complete. Best F1: {best_f1:.4f}")
-    
-    return {'best_f1': best_f1}
+                all_labels.extend(batch['labels'].numpy())
+
+        # Calculate metrics
+        avg_val_loss = val_loss / val_batches if val_batches > 0 else 0
+        f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
+        recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
+
+        # Record epoch metrics
+        epoch_metrics = {
+            'epoch': epoch + 1,
+            'train_loss': avg_train_loss,
+            'val_loss': avg_val_loss,
+            'f1_macro': f1_macro,
+            'precision_macro': precision_macro,
+            'recall_macro': recall_macro
+        }
+        epoch_history.append(epoch_metrics)
+
+        print(f"   Epoch {epoch+1}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, "
+              f"F1={f1_macro:.4f}, Precision={precision_macro:.4f}, Recall={recall_macro:.4f}")
+
+        # Track best model
+        if f1_macro > best_f1:
+            best_f1 = f1_macro
+            best_epoch = epoch + 1
+            best_metrics = {
+                'f1_macro': f1_macro,
+                'precision_macro': precision_macro,
+                'recall_macro': recall_macro,
+                'val_loss': avg_val_loss
+            }
+
+    print(f"   [OK] Fine-tuning complete. Best F1: {best_f1:.4f} (Epoch {best_epoch})")
+
+    # Return detailed metrics
+    return {
+        'best_f1': best_f1,
+        'best_epoch': best_epoch,
+        'best_metrics': best_metrics,
+        'final_f1': epoch_history[-1]['f1_macro'] if epoch_history else 0,
+        'final_loss': epoch_history[-1]['val_loss'] if epoch_history else 0,
+        'epoch_history': epoch_history,
+        'total_epochs': config.fine_tune_epochs
+    }
 
 
 # =============================================================================
@@ -843,4 +913,4 @@ if __name__ == "__main__":
     # Make permanent
     manager.make_pruning_permanent()
     
-    print("\n✅ Pruning module tests passed!")
+    print("\n[OK] Pruning module tests passed!")

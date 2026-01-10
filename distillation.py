@@ -358,7 +358,7 @@ class StudentModel(nn.Module):
             self.classifier.state_dict(),
             os.path.join(save_path, 'classifier.pt')
         )
-        
+
         config = {
             'model_name': self.model_name,
             'num_labels': self.num_labels,
@@ -366,6 +366,58 @@ class StudentModel(nn.Module):
         }
         with open(os.path.join(save_path, 'student_config.json'), 'w') as f:
             json.dump(config, f, indent=2)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        load_path: str,
+        dropout: float = 0.1,
+        classifier_hidden_size: int = 256,
+        **kwargs
+    ):
+        """
+        Load a saved student model.
+
+        Args:
+            load_path: Path where student model was saved
+            dropout: Dropout rate for classifier
+            classifier_hidden_size: Hidden size for classifier
+            **kwargs: Additional arguments (for quantization config, etc.)
+
+        Returns:
+            StudentModel instance
+        """
+        # Load config
+        config_path = os.path.join(load_path, 'student_config.json')
+        if os.path.exists(config_path):
+            with open(config_path, 'r') as f:
+                config = json.load(f)
+            model_name = config.get('model_name', 'distilbert-base-multilingual-cased')
+            num_labels = config.get('num_labels', 5)
+        else:
+            # Fallback to defaults
+            model_name = 'distilbert-base-multilingual-cased'
+            num_labels = 5
+
+        # Create model
+        model = cls(
+            model_name=model_name,
+            num_labels=num_labels,
+            dropout=dropout,
+            classifier_hidden_size=classifier_hidden_size
+        )
+
+        # Load encoder if saved separately
+        encoder_path = os.path.join(load_path, 'encoder')
+        if os.path.exists(encoder_path):
+            model.encoder = AutoModel.from_pretrained(encoder_path, **kwargs)
+
+        # Load classifier
+        classifier_path = os.path.join(load_path, 'classifier.pt')
+        if os.path.exists(classifier_path):
+            model.classifier.load_state_dict(torch.load(classifier_path, map_location='cpu'))
+
+        return model
 
 
 # =============================================================================
@@ -509,44 +561,46 @@ class MultiLabelDistillationLoss(nn.Module):
         return loss_dict
     
     def _compute_soft_loss(
-        self, 
-        student_logits: torch.Tensor, 
+        self,
+        student_logits: torch.Tensor,
         teacher_logits: torch.Tensor
     ) -> torch.Tensor:
         """
         Compute soft distillation loss.
-        
+
         THIS IS THE KEY FUNCTION FOR MULTI-LABEL KD!
-        
+
         Instead of KL divergence on softmax (wrong for multi-label),
         we use softened binary cross-entropy.
-        
+
         Steps:
         1. Apply temperature scaling to both logits
-        2. Convert to soft probabilities with sigmoid
-        3. Compute BCE between soft predictions
-        4. Scale by T² (see Hinton paper)
+        2. Convert teacher to soft targets with sigmoid
+        3. Compute BCE with logits (AMP-safe) between student logits and soft targets
+        4. Scale by T^2 (see Hinton paper)
+
+        NOTE: Using binary_cross_entropy_with_logits is more numerically stable
+        and AMP-safe than applying sigmoid then binary_cross_entropy.
         """
         # Temperature-scaled logits
         s_scaled = student_logits / self.temperature
         t_scaled = teacher_logits / self.temperature
-        
-        # Soft probabilities (sigmoid for multi-label!)
-        s_probs = torch.sigmoid(s_scaled)
-        t_probs = torch.sigmoid(t_scaled)
-        
-        # Binary cross-entropy between soft predictions
-        # Using F.binary_cross_entropy for numerical stability
-        soft_loss = F.binary_cross_entropy(
-            s_probs, 
-            t_probs.detach(),  # Detach teacher (no gradients)
+
+        # Soft probabilities from teacher (sigmoid for multi-label!)
+        t_probs = torch.sigmoid(t_scaled).detach()  # Detach teacher (no gradients)
+
+        # Binary cross-entropy with logits (AMP-safe version)
+        # This applies sigmoid internally and is numerically stable
+        soft_loss = F.binary_cross_entropy_with_logits(
+            s_scaled,
+            t_probs,
             reduction='mean'
         )
-        
-        # Scale by T² (compensates for gradient scaling from temperature)
+
+        # Scale by T^2 (compensates for gradient scaling from temperature)
         # See: Hinton et al., "Distilling the Knowledge in a Neural Network"
         soft_loss = soft_loss * (self.temperature ** 2)
-        
+
         return soft_loss
     
     def _compute_hidden_loss(
@@ -721,43 +775,60 @@ class DistillationTrainer:
     ) -> Dict[str, float]:
         """
         Perform one training step.
-        
+
+        Supports DUAL TOKENIZATION for Knowledge Distillation:
+        If batch contains 'student_input_ids', uses separate tokenizations
+        for teacher (input_ids) and student (student_input_ids).
+
         Args:
             batch: Dict with 'input_ids', 'attention_mask', 'labels'
+                   and optionally 'student_input_ids', 'student_attention_mask'
             optimizer: Optimizer for student
             class_weights: Optional class weights for imbalanced data
-        
+
         Returns:
             Dict with loss values
         """
         self.student.train()
-        
-        # Move batch to device
-        input_ids = batch['input_ids'].to(self.device)
-        attention_mask = batch['attention_mask'].to(self.device)
+
+        # Check if we have separate student tokenization
+        has_student_tokens = 'student_input_ids' in batch
+
+        # Teacher tokens (always use input_ids for teacher)
+        t_input_ids = batch['input_ids'].to(self.device)
+        t_attention_mask = batch['attention_mask'].to(self.device)
+
+        # Student tokens (use student_input_ids if available, else same as teacher)
+        if has_student_tokens:
+            s_input_ids = batch['student_input_ids'].to(self.device)
+            s_attention_mask = batch['student_attention_mask'].to(self.device)
+        else:
+            s_input_ids = t_input_ids
+            s_attention_mask = t_attention_mask
+
         labels = batch['labels'].to(self.device)
-        
+
         # Get teacher outputs (no gradients!)
         with torch.no_grad():
             teacher_outputs = self.teacher(
-                input_ids, attention_mask,
+                t_input_ids, t_attention_mask,
                 output_hidden_states=self.output_hidden,
                 output_attentions=self.output_attention
             )
-        
+
         # Forward pass with optional mixed precision
         if self.use_amp:
             from torch.cuda.amp import autocast
             with autocast():
                 student_outputs = self.student(
-                    input_ids, attention_mask,
+                    s_input_ids, s_attention_mask,
                     output_hidden_states=self.output_hidden,
                     output_attentions=self.output_attention
                 )
-                
+
                 pos_weight = class_weights.to(self.device) if class_weights is not None else None
                 loss_dict = self.loss_fn(student_outputs, teacher_outputs, labels, pos_weight)
-            
+
             # Backward pass with scaling
             optimizer.zero_grad()
             self.scaler.scale(loss_dict['total_loss']).backward()
@@ -768,19 +839,19 @@ class DistillationTrainer:
         else:
             # Standard forward/backward
             student_outputs = self.student(
-                input_ids, attention_mask,
+                s_input_ids, s_attention_mask,
                 output_hidden_states=self.output_hidden,
                 output_attentions=self.output_attention
             )
-            
+
             pos_weight = class_weights.to(self.device) if class_weights is not None else None
             loss_dict = self.loss_fn(student_outputs, teacher_outputs, labels, pos_weight)
-            
+
             optimizer.zero_grad()
             loss_dict['total_loss'].backward()
             torch.nn.utils.clip_grad_norm_(self.student.parameters(), self.config.gradient_clip_norm)
             optimizer.step()
-        
+
         # Return losses as floats
         return {k: v.item() if torch.is_tensor(v) else v for k, v in loss_dict.items()}
     
@@ -788,34 +859,51 @@ class DistillationTrainer:
     def evaluate(
         self,
         dataloader,
-        class_weights: Optional[torch.Tensor] = None
+        class_weights: Optional[torch.Tensor] = None,
+        use_student_input_ids: bool = True
     ) -> Dict:
         """
         Evaluate student model.
-        
-        Returns predictions, labels, and loss.
+
+        Supports DUAL TOKENIZATION:
+        If use_student_input_ids=True and batch contains 'student_input_ids',
+        uses student tokenization for evaluation. Otherwise uses 'input_ids'.
+
+        Args:
+            dataloader: Validation dataloader
+            class_weights: Optional class weights
+            use_student_input_ids: Whether to use student tokenization if available
+
+        Returns:
+            Dict with 'predictions', 'labels', and 'loss'
         """
         self.student.eval()
-        
+
         all_preds = []
         all_labels = []
         total_loss = 0.0
-        
+
         for batch in dataloader:
-            input_ids = batch['input_ids'].to(self.device)
-            attention_mask = batch['attention_mask'].to(self.device)
+            # Use student tokens if available and requested
+            if use_student_input_ids and 'student_input_ids' in batch:
+                input_ids = batch['student_input_ids'].to(self.device)
+                attention_mask = batch['student_attention_mask'].to(self.device)
+            else:
+                input_ids = batch['input_ids'].to(self.device)
+                attention_mask = batch['attention_mask'].to(self.device)
+
             labels = batch['labels'].to(self.device)
-            
+
             outputs = self.student(input_ids, attention_mask)
-            
+
             # Simple BCE for evaluation
             loss = F.binary_cross_entropy_with_logits(outputs['logits'], labels)
             total_loss += loss.item()
-            
+
             preds = torch.sigmoid(outputs['logits'])
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
-        
+
         return {
             'predictions': np.array(all_preds),
             'labels': np.array(all_labels),
@@ -854,49 +942,49 @@ def verify_teacher_performance(
     """
     from sklearn.metrics import f1_score, accuracy_score
     
-    print("\n🔍 Verifying teacher performance...")
-    
+    print("\nVerifying teacher performance...")
+
     teacher.eval()
     all_preds = []
     all_labels = []
-    
+
     with torch.no_grad():
         for batch in dataloader:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels']
-            
+
             outputs = teacher(input_ids, attention_mask)
             preds = torch.sigmoid(outputs['logits']) > 0.5
-            
+
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.numpy())
-    
+
     all_preds = np.array(all_preds)
     all_labels = np.array(all_labels)
-    
+
     # Compute metrics
     f1 = f1_score(all_labels, all_preds, average='macro')
     acc = accuracy_score(all_labels, all_preds)
-    
+
     metrics = {
         'f1_macro': f1,
         'accuracy': acc
     }
-    
+
     # Check if valid
     is_valid = f1 >= min_f1
-    
+
     if is_valid:
-        print(f"   ✅ Teacher verification PASSED!")
+        print(f"   Teacher verification PASSED!")
         print(f"      F1 Macro: {f1:.4f}")
         print(f"      Accuracy: {acc:.4f}")
     else:
-        print(f"   ❌ Teacher verification FAILED!")
+        print(f"   Teacher verification FAILED!")
         print(f"      F1 Macro: {f1:.4f} (minimum required: {min_f1})")
         print(f"      The teacher model doesn't appear to be fine-tuned!")
         print(f"      KD will not work well without a trained teacher.")
-    
+
     return is_valid, metrics
 
 
