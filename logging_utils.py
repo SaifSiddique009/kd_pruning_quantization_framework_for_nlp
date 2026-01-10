@@ -570,32 +570,54 @@ def log_warning(
 # =============================================================================
 
 def log_final_summary(
-    config,
-    all_metrics: Dict[str, Dict[str, Any]],
-    total_time_seconds: float,
-    log_file: str,
+    summary_or_config,
+    all_metrics: Optional[Dict[str, Dict[str, Any]]] = None,
+    total_time_seconds: Optional[float] = None,
+    log_file: Optional[str] = None,
     logger: Optional[logging.Logger] = None
 ):
     """
     Log final summary at end of pipeline.
 
+    Can be called in two ways:
+    1. Simple: log_final_summary({'compression_ratio': 1.5, 'f1_baseline': 0.9, ...})
+    2. Full: log_final_summary(config, all_metrics, total_time, log_file)
+
     Args:
-        config: Configuration used
-        all_metrics: All metrics from all stages
-        total_time_seconds: Total execution time
-        log_file: Path to log file
+        summary_or_config: Either a summary dict or config object
+        all_metrics: All metrics from all stages (optional)
+        total_time_seconds: Total execution time (optional)
+        log_file: Path to log file (optional)
         logger: Logger instance
     """
     if logger is None:
         logger = get_logger('summary')
 
-    logger.info("\n" + "=" * 70)
+    logger.info("")
+    logger.info("=" * 70)
     logger.info("FINAL SUMMARY")
     logger.info("=" * 70)
 
-    logger.info(f"\nPipeline: {config.pipeline}")
-    logger.info(f"Total Time: {total_time_seconds / 60:.2f} minutes")
-    logger.info(f"Log File: {log_file}")
+    # Handle simple dict case (just summary metrics)
+    if isinstance(summary_or_config, dict) and all_metrics is None:
+        summary = summary_or_config
+        if 'compression_ratio' in summary:
+            logger.info(f"  Compression: {summary['compression_ratio']:.2f}x")
+        if 'f1_baseline' in summary and 'f1_final' in summary:
+            logger.info(f"  F1: {summary['f1_baseline']:.4f} -> {summary['f1_final']:.4f}")
+        if 'size_baseline_mb' in summary and 'size_final_mb' in summary:
+            logger.info(f"  Size: {summary['size_baseline_mb']:.1f} MB -> {summary['size_final_mb']:.1f} MB")
+        logger.info("=" * 70)
+        return
+
+    # Handle full config case
+    config = summary_or_config
+    if hasattr(config, 'pipeline'):
+        logger.info(f"Pipeline: {config.pipeline}")
+    if total_time_seconds is not None:
+        logger.info(f"Total Time: {total_time_seconds / 60:.2f} minutes")
+    if log_file is not None:
+        logger.info(f"Log File: {log_file}")
 
     # Best metrics
     if all_metrics:
@@ -612,9 +634,8 @@ def log_final_summary(
         if 'latency_mean_ms' in final_metrics:
             logger.info(f"  Latency: {final_metrics['latency_mean_ms']:.2f} ms")
 
-    logger.info("\n" + "=" * 70)
-    logger.info("Pipeline completed successfully!")
     logger.info("=" * 70)
+    logger.info("Pipeline completed successfully!")
 
 
 # =============================================================================
