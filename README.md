@@ -75,7 +75,7 @@ graph TB
     subgraph KD["Knowledge Distillation"]
         K1[Soft Labels<br/>Temperature Scaling]
         K2[Hard Labels<br/>Ground Truth]
-        K3[Loss Function<br/>α × Soft + (1-α) × Hard]
+        K3["Loss Function<br/>a*Soft + (1-a)*Hard"]
     end
 
     T1 --> T2
