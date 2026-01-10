@@ -465,55 +465,57 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
                 print(f"   [Encoder] Using root: {local_dir}")
 
             # Create TeacherModel with encoder
+            # NOTE: If encoder_path points to encoder/ subfolder with model.safetensors,
+            # the encoder weights are ALREADY loaded correctly by AutoModel.from_pretrained()
+            encoder_already_loaded = os.path.exists(os.path.join(encoder_model_path, 'model.safetensors'))
+
             teacher = TeacherModel(
                 model_name=encoder_model_path,
                 num_labels=num_labels,
                 dropout=config.dropout
             )
-            print(f"   [Encoder] Architecture loaded!")
 
-            # Method 1: Load from pytorch_model.bin (full model state dict)
-            pytorch_model_path = os.path.join(local_dir, 'pytorch_model.bin')
-            loaded_weights = False
+            if encoder_already_loaded:
+                print(f"   [Encoder] Loaded from encoder/model.safetensors (pre-trained weights)")
+            else:
+                print(f"   [Encoder] Architecture loaded (base weights)")
 
-            if os.path.exists(pytorch_model_path):
-                print(f"   [Weights] Loading from pytorch_model.bin...")
-                full_state_dict = torch.load(pytorch_model_path, map_location='cpu')
+            # Now load classifier weights
+            # Priority: 1) classifier_head.pt, 2) pytorch_model.bin
+            loaded_classifier = False
 
-                # Extract encoder weights (keys starting with 'encoder.')
-                encoder_state = {k.replace('encoder.', ''): v
-                                for k, v in full_state_dict.items()
-                                if k.startswith('encoder.')}
-                if encoder_state:
-                    teacher.encoder.load_state_dict(encoder_state)
-                    print(f"   [Encoder] Loaded {len(encoder_state)} weight tensors")
+            # Method 1: Load from classifier_head.pt (recommended)
+            classifier_head_path = os.path.join(local_dir, 'classifier_head.pt')
+            if os.path.exists(classifier_head_path):
+                print(f"   [Classifier] Loading from classifier_head.pt...")
+                classifier_weights = torch.load(classifier_head_path, map_location='cpu')
 
-                # Extract classifier weights (keys starting with 'classifier.')
-                classifier_state = {k.replace('classifier.', ''): v
-                                   for k, v in full_state_dict.items()
-                                   if k.startswith('classifier.')}
-                if classifier_state:
-                    teacher.classifier.load_state_dict(classifier_state)
-                    print(f"   [Classifier] Loaded {len(classifier_state)} weight tensors")
-                    loaded_weights = True
+                # Handle nested format: {'classifier': state_dict}
+                if 'classifier' in classifier_weights:
+                    teacher.classifier.load_state_dict(classifier_weights['classifier'])
+                    print(f"   [Classifier] Loaded from nested 'classifier' key")
+                else:
+                    teacher.classifier.load_state_dict(classifier_weights)
+                    print(f"   [Classifier] Loaded directly")
+                loaded_classifier = True
 
-            # Method 2: Load from classifier_head.pt (classifier only)
-            if not loaded_weights:
-                classifier_head_path = os.path.join(local_dir, 'classifier_head.pt')
-                if os.path.exists(classifier_head_path):
-                    print(f"   [Weights] Loading from classifier_head.pt...")
-                    classifier_weights = torch.load(classifier_head_path, map_location='cpu')
+            # Method 2: Load from pytorch_model.bin (fallback)
+            if not loaded_classifier:
+                pytorch_model_path = os.path.join(local_dir, 'pytorch_model.bin')
+                if os.path.exists(pytorch_model_path):
+                    print(f"   [Classifier] Loading from pytorch_model.bin...")
+                    full_state_dict = torch.load(pytorch_model_path, map_location='cpu')
 
-                    # Handle nested format: {'classifier': state_dict}
-                    if 'classifier' in classifier_weights:
-                        teacher.classifier.load_state_dict(classifier_weights['classifier'])
-                        print(f"   [Classifier] Loaded from nested 'classifier' key")
-                    else:
-                        teacher.classifier.load_state_dict(classifier_weights)
-                        print(f"   [Classifier] Loaded directly")
-                    loaded_weights = True
+                    # Extract classifier weights (keys starting with 'classifier.')
+                    classifier_state = {k.replace('classifier.', ''): v
+                                       for k, v in full_state_dict.items()
+                                       if k.startswith('classifier.')}
+                    if classifier_state:
+                        teacher.classifier.load_state_dict(classifier_state)
+                        print(f"   [Classifier] Loaded {len(classifier_state)} weight tensors")
+                        loaded_classifier = True
 
-            if not loaded_weights:
+            if not loaded_classifier:
                 print(f"   [Warning] No classifier weights found!")
 
             teacher = teacher.to(device)
