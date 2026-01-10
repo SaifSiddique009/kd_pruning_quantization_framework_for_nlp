@@ -1032,7 +1032,7 @@ def run_compression_pipeline(config):
     comments, labels, label_distribution = load_and_preprocess_data(
         config.dataset_path, label_columns=config.label_columns
     )
-    log_dataset_info(len(comments), len(config.label_columns), label_distribution)
+    log_dataset_info(len(comments), label_distribution, config.label_columns)
 
     # Apply data_fraction for quick testing
     if config.data_fraction < 1.0:
