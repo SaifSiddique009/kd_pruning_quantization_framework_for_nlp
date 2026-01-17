@@ -1085,6 +1085,7 @@ def fine_tune_after_pruning(
         # Calculate metrics
         avg_val_loss = val_loss / val_batches if val_batches > 0 else 0
         f1_macro = f1_score(all_labels, all_preds, average='macro', zero_division=0)
+        f1_weighted = f1_score(all_labels, all_preds, average='weighted', zero_division=0)
         precision_macro = precision_score(all_labels, all_preds, average='macro', zero_division=0)
         recall_macro = recall_score(all_labels, all_preds, average='macro', zero_division=0)
 
@@ -1093,6 +1094,7 @@ def fine_tune_after_pruning(
             'epoch': epoch + 1,
             'train_loss': avg_train_loss,
             'val_loss': avg_val_loss,
+            'f1_weighted': f1_weighted,
             'f1_macro': f1_macro,
             'precision_macro': precision_macro,
             'recall_macro': recall_macro
@@ -1100,27 +1102,28 @@ def fine_tune_after_pruning(
         epoch_history.append(epoch_metrics)
 
         print(f"   Epoch {epoch+1}: Train Loss={avg_train_loss:.4f}, Val Loss={avg_val_loss:.4f}, "
-              f"F1={f1_macro:.4f}, Precision={precision_macro:.4f}, Recall={recall_macro:.4f}")
+              f"F1_weighted={f1_weighted:.4f}, F1_macro={f1_macro:.4f}")
 
-        # Track best model
-        if f1_macro > best_f1:
-            best_f1 = f1_macro
+        # Track best model (using f1_weighted as primary metric)
+        if f1_weighted > best_f1:
+            best_f1 = f1_weighted
             best_epoch = epoch + 1
             best_metrics = {
+                'f1_weighted': f1_weighted,
                 'f1_macro': f1_macro,
                 'precision_macro': precision_macro,
                 'recall_macro': recall_macro,
                 'val_loss': avg_val_loss
             }
 
-    print(f"   [OK] Fine-tuning complete. Best F1: {best_f1:.4f} (Epoch {best_epoch})")
+    print(f"   [OK] Fine-tuning complete. Best F1_weighted: {best_f1:.4f} (Epoch {best_epoch})")
 
     # Return detailed metrics
     return {
         'best_f1': best_f1,
         'best_epoch': best_epoch,
         'best_metrics': best_metrics,
-        'final_f1': epoch_history[-1]['f1_macro'] if epoch_history else 0,
+        'final_f1': epoch_history[-1]['f1_weighted'] if epoch_history else 0,
         'final_loss': epoch_history[-1]['val_loss'] if epoch_history else 0,
         'epoch_history': epoch_history,
         'total_epochs': config.fine_tune_epochs
