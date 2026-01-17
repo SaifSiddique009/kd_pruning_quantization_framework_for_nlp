@@ -62,32 +62,47 @@ def load_result_file(file_path: Path) -> Optional[Dict]:
 
 
 def extract_metrics(data: Dict, experiment_info: Dict) -> Dict:
-    """Extract relevant metrics from result data."""
+    """Extract relevant metrics from result data.
+
+    Handles nested JSON structure where metrics are in data["metrics"] array.
+    Uses the LAST stage (final results after all compression stages).
+    """
+    # Handle nested structure: data["metrics"] is a list of stages
+    if "metrics" in data and isinstance(data["metrics"], list):
+        # Use the last stage (final results after all compression)
+        stage_data = data["metrics"][-1] if data["metrics"] else {}
+    else:
+        # Fallback to flat structure for backwards compatibility
+        stage_data = data
+
+    # Extract per-label F1 scores from nested dict
+    per_label_f1 = stage_data.get("per_label_f1", {})
+
     metrics = {
         **experiment_info,
         # Classification metrics
-        "f1_macro": data.get("f1_macro"),
-        "f1_weighted": data.get("f1_weighted"),
-        "f1_micro": data.get("f1_micro"),
-        "accuracy": data.get("accuracy"),
-        "hamming_loss": data.get("hamming_loss"),
-        # Per-label F1 scores
-        "f1_bully": data.get("f1_bully"),
-        "f1_sexual": data.get("f1_sexual"),
-        "f1_religious": data.get("f1_religious"),
-        "f1_threat": data.get("f1_threat"),
-        "f1_spam": data.get("f1_spam"),
+        "f1_macro": stage_data.get("f1_macro"),
+        "f1_weighted": stage_data.get("f1_weighted"),
+        "f1_micro": stage_data.get("f1_micro"),
+        "accuracy": stage_data.get("accuracy_exact"),
+        "hamming_loss": stage_data.get("hamming_loss"),
+        # Per-label F1 scores (from nested dict)
+        "f1_bully": per_label_f1.get("bully"),
+        "f1_sexual": per_label_f1.get("sexual"),
+        "f1_religious": per_label_f1.get("religious"),
+        "f1_threat": per_label_f1.get("threat"),
+        "f1_spam": per_label_f1.get("spam"),
         # Efficiency metrics
-        "model_size_mb": data.get("model_size_mb"),
-        "latency_mean_ms": data.get("latency_mean_ms"),
-        "latency_p95_ms": data.get("latency_p95_ms"),
-        "throughput_samples_per_sec": data.get("throughput_samples_per_sec"),
+        "model_size_mb": stage_data.get("model_size_mb"),
+        "latency_mean_ms": stage_data.get("inference_latency_mean_ms"),
+        "latency_p95_ms": stage_data.get("inference_latency_p95_ms"),
+        "throughput_samples_per_sec": stage_data.get("throughput_samples_per_sec"),
         # Compression metrics
-        "sparsity_pct": data.get("sparsity_pct", data.get("sparsity")),
-        "compression_ratio": data.get("compression_ratio"),
-        "parameters": data.get("parameters", data.get("num_parameters")),
+        "sparsity_pct": stage_data.get("sparsity_percent"),
+        "compression_ratio": stage_data.get("size_compression_ratio"),
+        "parameters": stage_data.get("num_parameters"),
         # Stage info
-        "stage": data.get("stage"),
+        "stage": stage_data.get("stage"),
     }
 
     # Clean up None values for numeric fields
@@ -234,7 +249,7 @@ def main():
     print("QUICK SUMMARY")
     print("="*60)
 
-    if "f1_macro" in df.columns:
+    if "f1_macro" in df.columns and df["f1_macro"].notna().any():
         best_idx = df["f1_macro"].idxmax()
         print(f"\nBest F1 Macro: {df.loc[best_idx, 'f1_macro']:.4f}")
         print(f"  Experiment: {df.loc[best_idx, 'experiment']}")

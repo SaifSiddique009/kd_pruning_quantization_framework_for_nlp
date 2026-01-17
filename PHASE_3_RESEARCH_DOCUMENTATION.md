@@ -588,6 +588,46 @@ After pruning:   F1 = 0.60 (drop 15%)
 After fine-tune: F1 = 0.72 (recover 12%, net loss 3%)
 ```
 
+### 6.7 Masked Fine-Tuning for Sparsity Preservation
+
+**Problem Identified**: Standard fine-tuning after pruning can **restore pruned weights**, reducing actual sparsity from 50% to ~3%.
+
+**Cause**: When pruning is made permanent via `make_pruning_permanent()`, the mask is removed. During fine-tuning, the optimizer treats previously-zeroed weights like any other weight, allowing gradients to restore them.
+
+**Solution**: **Masked Fine-Tuning** - Preserve and apply pruning masks during fine-tuning.
+
+#### 6.7.1 Implementation
+
+1. **Extract masks before making permanent:**
+```python
+# BEFORE make_pruning_permanent()
+pruning_masks = pruner.get_pruning_masks()
+```
+
+2. **Apply masks to gradients during fine-tuning:**
+```python
+# In training loop, after loss.backward()
+if pruning_masks is not None:
+    with torch.no_grad():
+        for name, param in model.named_parameters():
+            if name in pruning_masks and param.grad is not None:
+                # Zero gradients for pruned weights
+                param.grad.mul_(pruning_masks[name].to(param.device))
+```
+
+#### 6.7.2 Effect
+
+| Metric | Without Mask | With Mask |
+|--------|--------------|-----------|
+| Target Sparsity | 50% | 50% |
+| Actual Sparsity | ~3% | ~50% |
+| F1 Drop | ~2% (misleading) | ~5-8% (accurate) |
+
+**Code References:**
+- `pruning.py:233` - `get_pruning_masks()` method
+- `pruning.py:1084-1089` - Gradient masking in fine-tuning
+- `main.py:924-926` - Mask extraction before permanent pruning
+
 ---
 
 ## 7. Experiment Design
@@ -835,6 +875,9 @@ if f1_weighted > best_f1:
 | `phase_a_baselines.ipynb` | 1, 3.1-3.2 | 6 | 3-4 hours |
 | `phase_b_kd_only.ipynb` | 2 | 4 | 8-10 hours |
 | `phase_cd_kd_prune.ipynb` | 3.3-3.6, 4 | 16 | 6-8 hours |
+| `phase_e_sensitivity.ipynb` | Sensitivity | 4 | 2-3 hours |
+
+**Total Experiments**: 30 (26 original + 4 sensitivity analysis)
 
 ### 11.2 Execution Dependencies
 
@@ -849,9 +892,31 @@ Phase A (Baselines)     Phase B (KD)
                │
                ▼
         Phase C+D (Prune KD)
+               │
+               ▼
+      Identify best 2 methods
+               │
+               ▼
+    Phase E (Sensitivity Analysis)
+    Test 30% and 70% sparsity
 ```
 
-**Critical**: Phase B must complete and upload KD models before Phase C+D can run.
+**Critical**:
+- Phase B must complete and upload KD models before Phase C+D can run.
+- Phase E runs AFTER Phase C+D to test the best 2 pruning methods at different sparsity levels.
+
+### 11.4 Phase E: Sensitivity Analysis
+
+After completing Phase C+D, identify the **2 best pruning methods** based on F1 retention, then run:
+
+| Experiment | Pruning Method | Sparsity | Purpose |
+|------------|----------------|----------|---------|
+| E1 | Best Method #1 | 30% | Lower sparsity test |
+| E2 | Best Method #1 | 70% | Higher sparsity test |
+| E3 | Best Method #2 | 30% | Lower sparsity test |
+| E4 | Best Method #2 | 70% | Higher sparsity test |
+
+**Goal**: Show accuracy-efficiency trade-off curve (Pareto frontier) for publication.
 
 ### 11.3 Repository and Data Configuration
 

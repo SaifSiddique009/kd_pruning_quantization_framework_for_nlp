@@ -229,6 +229,37 @@ class PruningManager:
                 prune.remove(module, param_name)
         
         print("   [OK] Pruning made permanent (masks applied to weights)")
+    
+    def get_pruning_masks(self) -> Dict[str, torch.Tensor]:
+        """
+        Extract and return pruning masks BEFORE making pruning permanent.
+        
+        WHAT: Saves the binary masks that indicate which weights are pruned
+        WHY: Needed to enforce sparsity during fine-tuning
+        HOW: Iterates through prunable modules and extracts weight_mask tensors
+        
+        IMPORTANT: Call this BEFORE make_pruning_permanent()!
+                   After make_pruning_permanent(), masks are removed.
+        
+        Returns:
+            Dict mapping parameter names to their mask tensors.
+            Mask values: 1 = keep weight, 0 = pruned weight
+        """
+        masks = {}
+        
+        for name, module in self.model.named_modules():
+            # Check if module has a pruning mask
+            if hasattr(module, 'weight_mask'):
+                # Store mask with full parameter path
+                mask_name = f"{name}.weight"
+                masks[mask_name] = module.weight_mask.clone().detach()
+                
+            if hasattr(module, 'bias_mask'):
+                mask_name = f"{name}.bias"
+                masks[mask_name] = module.bias_mask.clone().detach()
+        
+        print(f"   [OK] Extracted {len(masks)} pruning masks")
+        return masks
 
 
 # =============================================================================
@@ -965,7 +996,8 @@ def fine_tune_after_pruning(
     val_loader,
     config,
     device: str,
-    use_student_input_ids: bool = False
+    use_student_input_ids: bool = False,
+    pruning_masks: Optional[Dict[str, torch.Tensor]] = None
 ) -> Dict:
     """
     Fine-tune model after pruning to recover accuracy.
@@ -973,6 +1005,9 @@ def fine_tune_after_pruning(
     WHAT: Continue training the pruned model for a few epochs
     WHY: Pruning hurts accuracy; fine-tuning helps recover
     HOW: Standard training loop with lower learning rate
+    
+    IMPORTANT: If pruning_masks is provided, gradients for pruned weights
+               will be zeroed out to maintain sparsity during fine-tuning.
 
     Args:
         model: Pruned model
@@ -982,6 +1017,9 @@ def fine_tune_after_pruning(
         device: Device to train on
         use_student_input_ids: If True, use student_input_ids from batch
                                (for models that were trained with student tokenizer)
+        pruning_masks: Optional dict mapping parameter names to mask tensors.
+                      If provided, enforces sparsity during fine-tuning by
+                      zeroing gradients for pruned weights.
 
     Returns:
         Dict with detailed fine-tuning metrics including:
@@ -1041,6 +1079,14 @@ def fine_tune_after_pruning(
             outputs = model(input_ids, attention_mask)
             loss = loss_fn(outputs['logits'], labels)
             loss.backward()
+            
+            # Enforce sparsity by zeroing gradients for pruned weights
+            if pruning_masks is not None:
+                with torch.no_grad():
+                    for name, param in model.named_parameters():
+                        if name in pruning_masks and param.grad is not None:
+                            # Multiply gradient by mask: pruned positions get 0 gradient
+                            param.grad.mul_(pruning_masks[name].to(param.device))
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_norm)
             optimizer.step()

@@ -920,6 +920,11 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
     else:
         raise ValueError(f"Unknown pruning method: {config.prune_method}")
 
+    # Extract pruning masks BEFORE making permanent (for masked fine-tuning)
+    pruning_masks = None
+    if hasattr(pruner, 'get_pruning_masks'):
+        pruning_masks = pruner.get_pruning_masks()
+    
     # Make pruning permanent
     if hasattr(pruner, 'make_pruning_permanent'):
         pruner.make_pruning_permanent()
@@ -947,7 +952,8 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         print(f"\n   [Fine-tuning] for {config.fine_tune_epochs} epochs to recover accuracy...")
         fine_tune_metrics = fine_tune_after_pruning(
             model, train_loader, val_loader, config, device,
-            use_student_input_ids=use_student_input_ids
+            use_student_input_ids=use_student_input_ids,
+            pruning_masks=pruning_masks  # Pass masks to maintain sparsity
         )
 
         # Get F1 after fine-tuning
