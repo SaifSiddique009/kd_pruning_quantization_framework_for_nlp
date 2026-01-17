@@ -1,699 +1,597 @@
-# Model Compression Scenarios Guide
+# Phase 3: Comprehensive KD/Pruning Experiments
 
-This document describes all available compression scenarios for the Bangla Cyberbullying Detection framework.
+## Research Context
 
-## Table of Contents
+### Phase 1-2 Summary
+- **Phase 1**: Full finetuning of large models (XLM-RoBERTa, BanglaBERT) → Teacher models
+- **Phase 2**: Full finetuning of small models (SahajBERT, BanglaBERT-small) → Finetuned students
+- **Phase 3** (This): Knowledge Distillation + Pruning experiments
 
-- [Overview](#overview)
-- [Quick Reference](#quick-reference)
-- [Scenario 1: Baseline](#scenario-1-baseline)
-- [Scenario 2: KD Only](#scenario-2-kd-only-knowledge-distillation)
-- [Scenario 3: Prune Only](#scenario-3-prune-only)
-- [Scenario 4: Quant Only](#scenario-4-quant-only)
-- [Scenario 5: KD + Prune](#scenario-5-kd--prune)
-- [Scenario 6: KD + Quant](#scenario-6-kd--quant)
-- [Scenario 7: Prune + Quant](#scenario-7-prune--quant)
-- [Scenario 8: Full Pipeline](#scenario-8-full-pipeline-kd--prune--quant)
-- [Scenario 9: Pruning Methods](#scenario-9-pruning-method-comparison)
-- [Scenario 10: Quantization Types](#scenario-10-quantization-type-comparison)
-- [Scenario 11: Sparsity Levels](#scenario-11-sparsity-level-comparison)
-- [Scenario 12: K-Fold Validation](#scenario-12-k-fold-cross-validation)
-- [Scenario 13: Label Priority](#scenario-13-label-priority-weighted)
-- [Scenario 14: Student Models](#scenario-14-student-model-comparison)
-- [Scenario 15: Hyperparameter Search](#scenario-15-hyperparameter-grid-search)
-- [Recommended Workflow](#recommended-workflow)
-- [Comparing Results](#comparing-results)
+### Important Notes
+- Phase 1-2 used **F1 Weighted** by mistake
+- Phase 3 uses **F1 Macro** as the primary metric
+- All experiments use `--eval_fold 3` with `--use_original_folds` for consistent evaluation
+
+### Pruning Methods & Parameter Reduction
+
+| Method | Type | Reduces Parameters? | Speedup on Kaggle? |
+|--------|------|---------------------|-------------------|
+| **Magnitude** | Unstructured | NO (zeros weights) | NO |
+| **Wanda** | Unstructured | NO (zeros weights) | NO |
+| **Gradual** | Unstructured | NO (zeros weights) | NO |
+| **Structured** | Structured | **YES** (removes heads) | **YES** |
+
+**Key insight**: Only structured pruning actually reduces model size and gives real speedup on standard hardware!
 
 ---
 
-## Overview
+## Models Registry
 
-This framework supports multiple compression techniques that can be combined:
+### Teacher Models (Large, Finetuned in Phase 1)
 
-| Technique | Description | Compression | Speed Gain |
-|-----------|-------------|-------------|------------|
-| **Knowledge Distillation (KD)** | Transfer knowledge from large teacher to small student | 2-4x | 2-4x |
-| **Pruning** | Remove unimportant weights | 1.5-3x | 1.2-2x |
-| **Quantization** | Reduce precision (FP32 -> INT8/INT4) | 2-4x | 1.5-3x |
+| ID | Model | HuggingFace Path |
+|----|-------|------------------|
+| **T1** | XLM-RoBERTa | `Saif-Siddique/bangla-cyberbully-xlm-roberta-base` |
+| **T2** | BanglaBERT | `Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base` |
 
-### Your Models
+### Finetuned Student Models (Small, Finetuned in Phase 2)
 
-- **Teacher**: `Saif-Siddique/bangla-cyberbully-xlm-roberta-base` (finetuned)
-- **Student**: `neuropark/sahajBERT` (pretrained, will be trained via KD)
+| ID | Model | HuggingFace Path |
+|----|-------|------------------|
+| **FS1** | SahajBERT-ft | `Saif-Siddique/bangla-cyberbully-neuropark-sahajBERT` |
+| **FS2** | BanglaBERT-small-ft | `Saif-Siddique/bangla-cyberbully-csebuetnlp-banglabert_small` |
+
+### Raw Student Models (Not Finetuned)
+
+| ID | Model | HuggingFace Path |
+|----|-------|------------------|
+| **RS1** | SahajBERT-raw | `neuropark/sahajBERT` |
+| **RS2** | BanglaBERT-small-raw | `csebuetnlp/banglabert_small` |
+
+---
+
+## KD Combinations (4 Total)
+
+All teacher-student combinations for comprehensive comparison:
+
+| KD ID | Teacher | Raw Student | Output Name |
+|-------|---------|-------------|-------------|
+| **KD1** | T1 (XLM-RoBERTa) | RS1 (SahajBERT) | `kd_T1_RS1` |
+| **KD2** | T1 (XLM-RoBERTa) | RS2 (BanglaBERT-small) | `kd_T1_RS2` |
+| **KD3** | T2 (BanglaBERT) | RS1 (SahajBERT) | `kd_T2_RS1` |
+| **KD4** | T2 (BanglaBERT) | RS2 (BanglaBERT-small) | `kd_T2_RS2` |
+
+---
+
+## Experiment Summary
+
+| Scenario | Description | Runs |
+|----------|-------------|------|
+| **1** | Baselines (T1, T2, FS1, FS2) | 4 |
+| **2** | KD Only (KD1, KD2, KD3, KD4) | 4 |
+| **3** | Prune with Magnitude (FS1, FS2, KD1-4) | 6 |
+| **4** | Pruning Methods (wanda, gradual, structured on KD1-4) | 12 |
+| **Total** | | **26** |
+
+---
+
+## Optimized Execution Strategy
+
+### Key Optimization: Reuse KD Models!
+
+Instead of redoing KD for each pruning experiment, we:
+1. **Scenario 2**: Run KD once per combination, SAVE the distilled models
+2. **Scenario 3 & 4**: Load saved KD models, apply different pruning methods
+
+This saves ~4 hours per pruning experiment!
+
+### Execution Order
+
+```
+PHASE 1: Independent Runs (Parallel)
+├── Scenario 1: All baselines (4 runs)
+└── Scenario 2: All KD experiments (4 runs) → SAVE MODELS!
+
+PHASE 2: Depends on Scenario 2 (Parallel after PHASE 1)
+├── Scenario 3: Prune FS1, FS2 (2 runs) - can start immediately
+├── Scenario 3: Prune KD1-4 with magnitude (4 runs)
+└── Scenario 4: Prune KD1-4 with wanda, gradual, structured (12 runs)
+```
+
+### Kaggle Account Distribution
+
+| Account | Runs | Est. Time | Notes |
+|---------|------|-----------|-------|
+| **1** | 1.1-1.4 (baselines) | ~2h | Independent |
+| **2** | 2.1-2.4 (KD) | ~6h | **CRITICAL** - Save models! |
+| **3** | 3.1-3.2 (prune finetuned) | ~2h | Independent |
+| **4** | 3.3-3.6 (prune KD, magnitude) | ~4h | Wait for Account 2 |
+| **5** | 4.1-4.12 (other methods) | ~8h | Wait for Account 2 |
+
+---
+
+## Default Hyperparameters
+
+### Knowledge Distillation
+| Parameter | Value | CLI Flag |
+|-----------|-------|----------|
+| Epochs | 15 | `--epochs` |
+| Batch Size | 32 | `--batch` |
+| Learning Rate | 2e-5 | `--lr` |
+| Alpha | 0.7 | `--kd_alpha` |
+| Temperature | 4.0 | `--kd_temperature` |
+
+### Pruning
+| Parameter | Value | CLI Flag |
+|-----------|-------|----------|
+| Target Sparsity | 50% | `--prune_sparsity` |
+| Fine-tune Epochs | 3 | `--fine_tune_epochs` |
+| Fine-tune After | True | `--fine_tune_after_prune` |
+
+---
+
+## Scenario 1: Baselines (4 runs)
+
+### Run 1.1: Teacher T1 - XLM-RoBERTa
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline baseline \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario1/T1_baseline
+```
+
+### Run 1.2: Teacher T2 - BanglaBERT
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline baseline \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario1/T2_baseline
+```
+
+### Run 1.3: Finetuned Student FS1 - SahajBERT
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline baseline \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-neuropark-sahajBERT" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario1/FS1_baseline
+```
+
+### Run 1.4: Finetuned Student FS2 - BanglaBERT-small
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline baseline \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-csebuetnlp-banglabert_small" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario1/FS2_baseline
+```
+
+---
+
+## Scenario 2: KD Only (4 runs) - SAVE THESE MODELS!
+
+**IMPORTANT**: Save the output models from these runs. They will be reused in Scenarios 3 and 4!
+
+### Run 2.1: KD1 - T1 -> RS1 (XLM-RoBERTa -> SahajBERT)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "neuropark/sahajBERT" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario2/KD1_T1_RS1
+
+# SAVE MODEL: Copy ./results/scenario2/KD1_T1_RS1/model_final_hf to reuse!
+```
+
+### Run 2.2: KD2 - T1 -> RS2 (XLM-RoBERTa -> BanglaBERT-small)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario2/KD2_T1_RS2
+```
+
+### Run 2.3: KD3 - T2 -> RS1 (BanglaBERT -> SahajBERT)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "neuropark/sahajBERT" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario2/KD3_T2_RS1
+```
+
+### Run 2.4: KD4 - T2 -> RS2 (BanglaBERT -> BanglaBERT-small)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario2/KD4_T2_RS2
+```
+
+---
+
+## Scenario 3: Pruning with Magnitude (6 runs)
+
+Prune finetuned students and KD models using magnitude pruning.
+
+### Run 3.1: Prune FS1 (Finetuned SahajBERT)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline prune_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-neuropark-sahajBERT" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/FS1_magnitude
+```
+
+### Run 3.2: Prune FS2 (Finetuned BanglaBERT-small)
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline prune_only \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-csebuetnlp-banglabert_small" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/FS2_magnitude
+```
+
+### Run 3.3: Prune KD1 with Magnitude
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/KD1_magnitude
+```
+
+### Run 3.4: Prune KD2 with Magnitude
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/KD2_magnitude
+```
+
+### Run 3.5: Prune KD3 with Magnitude
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/KD3_magnitude
+```
+
+### Run 3.6: Prune KD4 with Magnitude
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method magnitude --prune_sparsity 0.5 \
+    --fine_tune_after_prune --fine_tune_epochs 3 \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario3/KD4_magnitude
+```
+
+---
+
+## Scenario 4: Pruning Methods Comparison (12 runs)
+
+Compare wanda, gradual, and structured pruning on all 4 KD models.
+(Magnitude already done in Scenario 3)
+
+### Wanda Pruning (4 runs)
+
+#### Run 4.1: KD1 + Wanda
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method wanda --prune_sparsity 0.5 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD1_wanda
+```
+
+#### Run 4.2: KD2 + Wanda
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method wanda --prune_sparsity 0.5 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD2_wanda
+```
+
+#### Run 4.3: KD3 + Wanda
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method wanda --prune_sparsity 0.5 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD3_wanda
+```
+
+#### Run 4.4: KD4 + Wanda
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method wanda --prune_sparsity 0.5 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD4_wanda
+```
+
+### Gradual Pruning (4 runs)
+
+#### Run 4.5: KD1 + Gradual
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method gradual --prune_sparsity 0.5 --prune_schedule cubic \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD1_gradual
+```
+
+#### Run 4.6: KD2 + Gradual
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method gradual --prune_sparsity 0.5 --prune_schedule cubic \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD2_gradual
+```
+
+#### Run 4.7: KD3 + Gradual
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method gradual --prune_sparsity 0.5 --prune_schedule cubic \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD3_gradual
+```
+
+#### Run 4.8: KD4 + Gradual
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method gradual --prune_sparsity 0.5 --prune_schedule cubic \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD4_gradual
+```
+
+### Structured Pruning (4 runs) - ACTUALLY REDUCES PARAMETERS!
+
+#### Run 4.9: KD1 + Structured
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method structured --prune_sparsity 0.3 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD1_structured
+```
+
+#### Run 4.10: KD2 + Structured
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method structured --prune_sparsity 0.3 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD2_structured
+```
+
+#### Run 4.11: KD3 + Structured
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "neuropark/sahajBERT" \
+    --prune_method structured --prune_sparsity 0.3 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD3_structured
+```
+
+#### Run 4.12: KD4 + Structured
+```bash
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "Saif-Siddique" \
+    --pipeline kd_prune \
+    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base" \
+    --student_path "csebuetnlp/banglabert_small" \
+    --prune_method structured --prune_sparsity 0.3 \
+    --fine_tune_after_prune \
+    --use_original_folds --eval_fold 3 \
+    --output_dir ./results/scenario4/KD4_structured
+```
+
+---
+
+## Results Directory Structure
+
+```
+./results/
+├── scenario1/
+│   ├── T1_baseline/
+│   ├── T2_baseline/
+│   ├── FS1_baseline/
+│   └── FS2_baseline/
+├── scenario2/
+│   ├── KD1_T1_RS1/     # SAVE for reuse!
+│   ├── KD2_T1_RS2/
+│   ├── KD3_T2_RS1/
+│   └── KD4_T2_RS2/
+├── scenario3/
+│   ├── FS1_magnitude/
+│   ├── FS2_magnitude/
+│   ├── KD1_magnitude/
+│   ├── KD2_magnitude/
+│   ├── KD3_magnitude/
+│   └── KD4_magnitude/
+└── scenario4/
+    ├── KD1_wanda/
+    ├── KD2_wanda/
+    ├── KD3_wanda/
+    ├── KD4_wanda/
+    ├── KD1_gradual/
+    ├── KD2_gradual/
+    ├── KD3_gradual/
+    ├── KD4_gradual/
+    ├── KD1_structured/
+    ├── KD2_structured/
+    ├── KD3_structured/
+    └── KD4_structured/
+```
+
+---
+
+## Why Not Reuse KD in Current Implementation?
+
+**Current limitation**: The `kd_prune` pipeline does KD fresh every time.
+
+**Workaround if you want to reuse KD models**:
+1. Run Scenario 2 first with `kd_only`
+2. Upload saved models to HuggingFace
+3. Use `prune_only` with saved KD model as `teacher_checkpoint`
+
+```bash
+# Example: After uploading KD1 to HuggingFace
+!python main.py \
+    --pipeline prune_only \
+    --teacher_checkpoint "YOUR_USERNAME/kd1_sahajbert_distilled" \
+    --prune_method wanda \
+    --prune_sparsity 0.5 \
+    --output_dir ./results/scenario4/KD1_wanda_reused
+```
+
+**For this experiment set**: We use `kd_prune` for simplicity, accepting the redundant KD computation. Future optimization could implement model caching.
 
 ---
 
 ## Quick Reference
 
-| Scenario | Pipeline | Purpose | Estimated Time |
-|----------|----------|---------|----------------|
-| 1 | `baseline` | Teacher performance reference | 10 min |
-| 2 | `kd_only` | Knowledge distillation | 30 min |
-| 3 | `prune_only` | Weight pruning | 20 min |
-| 4 | `quant_only` | Quantization | 10 min |
-| 5 | `kd_prune` | Distill + prune | 45 min |
-| 6 | `kd_quant` | Distill + quantize | 35 min |
-| 7 | `prune_quant` | Prune + quantize | 25 min |
-| 8 | `kd_prune_quant` | Full compression | 1 hour |
+### Model Paths
+| ID | Path |
+|----|------|
+| T1 | `Saif-Siddique/bangla-cyberbully-xlm-roberta-base` |
+| T2 | `Saif-Siddique/bangla-cyberbully-sagor-bangla-bert-base` |
+| FS1 | `Saif-Siddique/bangla-cyberbully-neuropark-sahajBERT` |
+| FS2 | `Saif-Siddique/bangla-cyberbully-csebuetnlp-banglabert_small` |
+| RS1 | `neuropark/sahajBERT` |
+| RS2 | `csebuetnlp/banglabert_small` |
 
----
+### Pruning Methods
+| Method | CLI Flag | Reduces Params? |
+|--------|----------|-----------------|
+| Magnitude | `--prune_method magnitude` | No |
+| Wanda | `--prune_method wanda` | No |
+| Gradual | `--prune_method gradual --prune_schedule cubic` | No |
+| Structured | `--prune_method structured` | **Yes** |
 
-## Scenario 1: BASELINE
-
-**Purpose:** Establish performance baseline of teacher model (no compression)
-
-**What happens:**
-- Loads your finetuned teacher model from HuggingFace
-- Evaluates on test set
-- Records metrics (F1, latency, model size)
-- This is your reference point for comparison
-
-**Command:**
+### Quick Test
 ```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline baseline \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --output_dir ./results/scenario1_baseline
-```
-
-**Expected Output:**
-- `final_metrics.json` with teacher performance
-- Model size and latency measurements
-
----
-
-## Scenario 2: KD ONLY (Knowledge Distillation)
-
-**Purpose:** Transfer knowledge from large teacher to smaller student model
-
-**What happens:**
-1. Teacher generates soft labels (probability distributions)
-2. Student learns from both:
-   - **Soft labels** from teacher (weighted by alpha)
-   - **Hard labels** from ground truth (weighted by 1-alpha)
-3. Result: Smaller model with similar accuracy
-
-**Key Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--kd_epochs` | 5 | Training epochs |
-| `--kd_alpha` | 0.7 | Weight for soft loss (0.7 = 70% teacher, 30% ground truth) |
-| `--kd_temperature` | 4.0 | Softens probability distribution (higher = softer) |
-| `--kd_learning_rate` | 2e-5 | Learning rate |
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
+!python main.py \
+    --dataset_path "/kaggle/input/bangla-cyberbully-dataset/1_Multilablel_Cyberbully_Data.csv" \
+    --author_name "test" \
     --pipeline kd_only \
     --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
     --student_path "neuropark/sahajBERT" \
-    --kd_epochs 5 \
-    --kd_learning_rate 2e-5 \
-    --kd_alpha 0.7 \
-    --kd_temperature 4.0 \
-    --output_dir ./results/scenario2_kd_only
-```
-
-**Expected Output:**
-- Distilled student model in `compressed_models/model_hf/`
-- Training curves and metrics
-
----
-
-## Scenario 3: PRUNE ONLY
-
-**Purpose:** Make teacher model sparser by removing unimportant weights
-
-**What happens:**
-1. Identifies least important weights (by magnitude)
-2. Sets them to zero (creates sparsity)
-3. Fine-tunes to recover accuracy
-4. Result: Sparser model, potentially faster on specialized hardware
-
-**Key Parameters:**
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `--pruning_method` | magnitude | Algorithm: magnitude, gradual, wanda |
-| `--target_sparsity` | 0.3 | Fraction of weights to remove (0.3 = 30%) |
-| `--prune_epochs` | 3 | Fine-tuning epochs after pruning |
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline prune_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --pruning_method magnitude \
-    --target_sparsity 0.3 \
-    --prune_epochs 3 \
-    --output_dir ./results/scenario3_prune_only
-```
-
----
-
-## Scenario 4: QUANT ONLY
-
-**Purpose:** Reduce precision of model weights
-
-**What happens:**
-1. Converts FP32 weights to lower precision
-2. FP16: 16-bit floating point
-3. INT8: 8-bit integer (~4x smaller)
-4. INT4: 4-bit integer (~8x smaller, requires bitsandbytes)
-
-**Key Parameters:**
-| Parameter | Options | Description |
-|-----------|---------|-------------|
-| `--quantization_type` | fp16, int8, int4 | Quantization level |
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline quant_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --quantization_type int8 \
-    --output_dir ./results/scenario4_quant_only
-```
-
----
-
-## Scenario 5: KD + PRUNE
-
-**Purpose:** Two-stage compression - distill first, then prune
-
-**What happens:**
-1. Knowledge distillation to student
-2. Prune the distilled student
-3. Fine-tune to recover accuracy
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_epochs 5 \
-    --kd_alpha 0.7 \
-    --pruning_method magnitude \
-    --target_sparsity 0.3 \
-    --prune_epochs 3 \
-    --output_dir ./results/scenario5_kd_prune
-```
-
----
-
-## Scenario 6: KD + QUANT
-
-**Purpose:** Distill to student, then quantize
-
-**What happens:**
-1. Knowledge distillation to student
-2. Quantize the distilled student
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_epochs 5 \
-    --quantization_type int8 \
-    --output_dir ./results/scenario6_kd_quant
-```
-
----
-
-## Scenario 7: PRUNE + QUANT
-
-**Purpose:** Prune teacher, then quantize (no KD)
-
-**What happens:**
-1. Prune teacher model
-2. Quantize the pruned teacher
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline prune_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --pruning_method magnitude \
-    --target_sparsity 0.3 \
-    --quantization_type int8 \
-    --output_dir ./results/scenario7_prune_quant
-```
-
----
-
-## Scenario 8: FULL PIPELINE (KD + PRUNE + QUANT)
-
-**Purpose:** Maximum compression using all three techniques
-
-**What happens:**
-1. Knowledge distillation to student
-2. Prune the distilled student
-3. Quantize the pruned student
-4. Result: Smallest, fastest model
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_epochs 5 \
-    --kd_alpha 0.7 \
-    --kd_temperature 4.0 \
-    --pruning_method magnitude \
-    --target_sparsity 0.3 \
-    --prune_epochs 3 \
-    --quantization_type int8 \
-    --output_dir ./results/scenario8_full_pipeline
-```
-
----
-
-## Scenario 9: PRUNING METHOD COMPARISON
-
-Compare different pruning algorithms:
-
-| Method | Description | Pros | Cons |
-|--------|-------------|------|------|
-| **magnitude** | Remove smallest absolute weights | Simple, fast | May remove important small weights |
-| **gradual** | Prune incrementally during training | Better accuracy | Slower |
-| **wanda** | Activation-aware pruning | State-of-the-art | More complex |
-
-### 9A: Magnitude Pruning
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --pruning_method magnitude \
-    --target_sparsity 0.5 \
-    --output_dir ./results/scenario9a_magnitude
-```
-
-### 9B: Gradual Pruning
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --pruning_method gradual \
-    --target_sparsity 0.5 \
-    --output_dir ./results/scenario9b_gradual
-```
-
-### 9C: Wanda Pruning
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --pruning_method wanda \
-    --target_sparsity 0.5 \
-    --output_dir ./results/scenario9c_wanda
-```
-
----
-
-## Scenario 10: QUANTIZATION TYPE COMPARISON
-
-Compare different quantization levels:
-
-| Type | Bits | Size Reduction | Quality Loss |
-|------|------|----------------|--------------|
-| **fp16** | 16 | ~2x | Minimal |
-| **int8** | 8 | ~4x | Low |
-| **int4** | 4 | ~8x | Moderate |
-
-### 10A: FP16 Quantization
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --quantization_type fp16 \
-    --output_dir ./results/scenario10a_fp16
-```
-
-### 10B: INT8 Quantization
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --quantization_type int8 \
-    --output_dir ./results/scenario10b_int8
-```
-
-### 10C: INT4 Quantization
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --quantization_type int4 \
-    --output_dir ./results/scenario10c_int4
-```
-
----
-
-## Scenario 11: SPARSITY LEVEL COMPARISON
-
-Compare different pruning intensities:
-
-| Sparsity | Weights Removed | Expected F1 Drop |
-|----------|-----------------|------------------|
-| 20% | 1 in 5 | Minimal |
-| 30% | 1 in 3 | Low |
-| 50% | 1 in 2 | Moderate |
-| 70% | 7 in 10 | Significant |
-
-### Commands
-```bash
-# 20% Sparsity
-python main.py \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --target_sparsity 0.2 \
-    --output_dir ./results/scenario11_sparsity_20
-
-# 30% Sparsity
-python main.py \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --target_sparsity 0.3 \
-    --output_dir ./results/scenario11_sparsity_30
-
-# 50% Sparsity
-python main.py \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --target_sparsity 0.5 \
-    --output_dir ./results/scenario11_sparsity_50
-
-# 70% Sparsity
-python main.py \
-    --pipeline kd_prune \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --target_sparsity 0.7 \
-    --output_dir ./results/scenario11_sparsity_70
-```
-
----
-
-## Scenario 12: K-FOLD CROSS VALIDATION
-
-**Purpose:** Robust evaluation across all K folds
-
-**What happens:**
-- Runs the full pipeline on all 5 folds
-- Aggregates results: mean +/- std
-- More reliable performance estimate
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --run_full_kfold \
-    --num_folds 5 \
-    --output_dir ./results/scenario12_kfold
-```
-
-**Expected Output:**
-```
-Aggregate Results (5 folds):
-  F1 Macro: 0.847 +/- 0.012
-  Precision: 0.832 +/- 0.015
-  Recall: 0.863 +/- 0.011
-```
-
----
-
-## Scenario 13: LABEL PRIORITY WEIGHTED
-
-**Purpose:** Weight certain labels higher in evaluation
-
-**Use Case:** When detecting threats is more critical than detecting spam
-
-**Priority Format:** JSON dictionary with label weights
-```json
-{"threat": 3, "sexual": 2, "bully": 1, "religious": 1, "spam": 1}
-```
-
-**Command:**
-```bash
-python main.py \
-    --dataset_path ./data/1_Multilablel_Cyberbully_Data.csv \
-    --author_name "Saif-Siddique" \
-    --pipeline kd_prune_quant \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --label_priority '{"threat": 3, "sexual": 2, "bully": 1, "religious": 1, "spam": 1}' \
-    --output_dir ./results/scenario13_weighted
-```
-
----
-
-## Scenario 14: STUDENT MODEL COMPARISON
-
-Compare different student architectures:
-
-| Student | Parameters | Language | Notes |
-|---------|------------|----------|-------|
-| sahajBERT | ~110M | Bangla | Optimized for Bangla |
-| DistilBERT | ~66M | Multilingual | Smaller, general purpose |
-| MobileBERT | ~25M | English | Very small, mobile-friendly |
-
-### 14A: sahajBERT (Bangla Optimized)
-```bash
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --output_dir ./results/scenario14a_sahajbert
-```
-
-### 14B: DistilBERT Multilingual
-```bash
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "distilbert-base-multilingual-cased" \
-    --output_dir ./results/scenario14b_distilbert
-```
-
-### 14C: MobileBERT
-```bash
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "google/mobilebert-uncased" \
-    --output_dir ./results/scenario14c_mobilebert
-```
-
----
-
-## Scenario 15: HYPERPARAMETER GRID SEARCH
-
-**Purpose:** Find optimal KD hyperparameters
-
-**Search Space:**
-| Parameter | Values |
-|-----------|--------|
-| alpha | 0.5, 0.7, 0.9 |
-| temperature | 2.0, 4.0, 6.0 |
-| learning_rate | 1e-5, 2e-5, 5e-5 |
-
-**Commands:**
-```bash
-# Alpha=0.5, Temperature=2.0
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_alpha 0.5 \
-    --kd_temperature 2.0 \
-    --data_fraction 0.2 \
-    --output_dir ./results/scenario15_grid/a0.5_t2.0
-
-# Alpha=0.7, Temperature=4.0 (Default)
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_alpha 0.7 \
-    --kd_temperature 4.0 \
-    --data_fraction 0.2 \
-    --output_dir ./results/scenario15_grid/a0.7_t4.0
-
-# Alpha=0.9, Temperature=6.0
-python main.py \
-    --pipeline kd_only \
-    --teacher_checkpoint "Saif-Siddique/bangla-cyberbully-xlm-roberta-base" \
-    --student_path "neuropark/sahajBERT" \
-    --kd_alpha 0.9 \
-    --kd_temperature 6.0 \
-    --data_fraction 0.2 \
-    --output_dir ./results/scenario15_grid/a0.9_t6.0
-```
-
----
-
-## Recommended Workflow
-
-```
-Step 1: Quick Test (5 min)
-    python main.py --data_fraction 0.05 --kd_epochs 1 ...
-    Verify everything works
-
-Step 2: Baseline (10 min)
-    Scenario 1: Get teacher metrics
-
-Step 3: KD Only (30 min)
-    Scenario 2: Establish KD performance
-
-Step 4: Compare Compression Methods (1-2 hours)
-    Scenario 3: Prune Only
-    Scenario 4: Quant Only
-    Compare size/accuracy tradeoff
-
-Step 5: Best Combination (1 hour)
-    Scenario 8: Full Pipeline
-
-Step 6: Ablation Studies (2-4 hours)
-    Scenario 9: Pruning methods
-    Scenario 10: Quantization types
-    Scenario 11: Sparsity sweep
-
-Step 7: Final Evaluation (1-2 hours)
-    Scenario 12: K-Fold on best config
-```
-
----
-
-## Comparing Results
-
-### Collect Results Script
-
-```python
-import json
-import os
-import pandas as pd
-
-results = []
-results_dir = './results'
-
-for scenario in os.listdir(results_dir):
-    metrics_path = os.path.join(results_dir, scenario, 'final_metrics.json')
-    if os.path.exists(metrics_path):
-        with open(metrics_path) as f:
-            metrics = json.load(f)
-        results.append({
-            'scenario': scenario,
-            'f1_macro': metrics.get('f1_macro', 0),
-            'f1_weighted': metrics.get('f1_weighted', 0),
-            'precision': metrics.get('precision_macro', 0),
-            'recall': metrics.get('recall_macro', 0),
-            'latency_ms': metrics.get('latency_mean_ms', 0),
-            'model_size_mb': metrics.get('model_size_mb', 0),
-            'sparsity': metrics.get('sparsity', 0),
-            'compression_ratio': metrics.get('compression_ratio', 1)
-        })
-
-df = pd.DataFrame(results).sort_values('f1_macro', ascending=False)
-print(df.to_string(index=False))
-df.to_csv('./results/comparison.csv', index=False)
-```
-
-### Expected Output Table
-
-| Scenario | F1 Macro | Size (MB) | Latency (ms) | Compression |
-|----------|----------|-----------|--------------|-------------|
-| baseline | 0.89 | 450 | 45 | 1.0x |
-| kd_only | 0.86 | 250 | 25 | 1.8x |
-| kd_prune | 0.84 | 180 | 20 | 2.5x |
-| kd_quant | 0.85 | 65 | 15 | 6.9x |
-| kd_prune_quant | 0.83 | 45 | 12 | 10.0x |
-
----
-
-## Troubleshooting
-
-### Out of Memory (OOM)
-```bash
-# Reduce batch size
---kd_batch_size 8
-
-# Use smaller data fraction for testing
---data_fraction 0.1
-```
-
-### Slow Training
-```bash
-# Use fewer epochs for testing
---kd_epochs 2
-
-# Use FP16 for faster training
---mixed_precision
-```
-
-### INT4 Not Working
-```bash
-# Install bitsandbytes
-pip install bitsandbytes
-
-# Or fall back to INT8
---quantization_type int8
-```
-
----
-
-## Citation
-
-If you use this framework, please cite:
-
-```bibtex
-@software{bangla_cyberbully_compression,
-  title = {Bangla Cyberbullying Detection Model Compression Framework},
-  author = {Saif-Siddique},
-  url = {https://github.com/Saif-Siddique},
-  year = {2024}
-}
+    --data_fraction 0.1 --epochs 2 \
+    --output_dir ./results/quick_test
 ```
