@@ -677,6 +677,7 @@ class StructuredPruner:
         self.head_importance = {}
         self.num_layers = 0
         self.num_heads = 0
+        self.is_albert = False  # Will be set by _find_encoder_structure()
 
         # Find encoder structure
         self._find_encoder_structure()
@@ -688,33 +689,71 @@ class StructuredPruner:
 
     def _find_encoder_structure(self):
         """Find the encoder structure and number of attention heads."""
-        # Try different encoder access patterns
         encoder = None
+        self.is_albert = False
 
-        # Pattern 1: model.encoder (standard BERT)
+        # Pattern 1: model.encoder.layer (standard BERT direct)
         if hasattr(self.model, 'encoder') and hasattr(self.model.encoder, 'layer'):
             encoder = self.model.encoder
-        # Pattern 2: model.model.encoder (wrapped models)
+
+        # Pattern 2: model.encoder.encoder (our TransformerMultiLabelClassifier wrapper)
+        elif hasattr(self.model, 'encoder') and hasattr(self.model.encoder, 'encoder'):
+            inner_encoder = self.model.encoder.encoder
+            # Check if it's ALBERT
+            if hasattr(inner_encoder, 'albert_layer_groups'):
+                encoder = inner_encoder
+                self.is_albert = True
+            # Check if it's standard BERT inside wrapper
+            elif hasattr(inner_encoder, 'layer'):
+                encoder = inner_encoder
+
+        # Pattern 3: model.model.encoder (other wrapped models)
         elif hasattr(self.model, 'model') and hasattr(self.model.model, 'encoder'):
             encoder = self.model.model.encoder
-        # Pattern 3: model.bert.encoder (BertModel)
+
+        # Pattern 4: model.bert.encoder (BertModel)
         elif hasattr(self.model, 'bert') and hasattr(self.model.bert, 'encoder'):
             encoder = self.model.bert.encoder
-        # Pattern 4: model.roberta.encoder (RoBERTa)
+
+        # Pattern 5: model.roberta.encoder (RoBERTa)
         elif hasattr(self.model, 'roberta') and hasattr(self.model.roberta, 'encoder'):
             encoder = self.model.roberta.encoder
 
-        if encoder is not None and hasattr(encoder, 'layer'):
-            self.num_layers = len(encoder.layer)
-            # Get number of heads from first layer
-            first_layer = encoder.layer[0]
-            if hasattr(first_layer, 'attention'):
-                if hasattr(first_layer.attention, 'self'):
-                    self.num_heads = first_layer.attention.self.num_attention_heads
-                elif hasattr(first_layer.attention, 'num_attention_heads'):
-                    self.num_heads = first_layer.attention.num_attention_heads
+        # Pattern 6: model.albert.encoder (direct ALBERT)
+        elif hasattr(self.model, 'albert') and hasattr(self.model.albert, 'encoder'):
+            encoder = self.model.albert.encoder
+            self.is_albert = True
+
+        # Extract layer count and head count
+        if encoder is not None:
+            if self.is_albert and hasattr(encoder, 'albert_layer_groups'):
+                # ALBERT: layers are in albert_layer_groups[g].albert_layers[l]
+                num_groups = len(encoder.albert_layer_groups)
+                if num_groups > 0:
+                    inner_layers = len(encoder.albert_layer_groups[0].albert_layers)
+                    self.num_layers = inner_layers  # Use inner layers count
+                    first_layer = encoder.albert_layer_groups[0].albert_layers[0]
+
+                    # ALBERT attention heads are direct attribute
+                    if hasattr(first_layer, 'attention'):
+                        if hasattr(first_layer.attention, 'num_attention_heads'):
+                            self.num_heads = first_layer.attention.num_attention_heads
+
+            elif hasattr(encoder, 'layer'):
+                # Standard BERT/RoBERTa pattern
+                self.num_layers = len(encoder.layer)
+                if self.num_layers > 0:
+                    first_layer = encoder.layer[0]
+                    if hasattr(first_layer, 'attention'):
+                        if hasattr(first_layer.attention, 'self'):
+                            self.num_heads = first_layer.attention.self.num_attention_heads
+                        elif hasattr(first_layer.attention, 'num_attention_heads'):
+                            self.num_heads = first_layer.attention.num_attention_heads
 
         self.encoder = encoder
+
+        if encoder is None:
+            print("   [WARN] Could not find encoder structure!")
 
     def compute_head_importance(
         self,
@@ -767,12 +806,24 @@ class StructuredPruner:
                     attention_outputs[layer_idx].append(head_magnitude)
             return hook
 
+        # Get layers based on architecture
+        if self.is_albert:
+            # ALBERT: use first layer group's layers (they're shared)
+            layers = self.encoder.albert_layer_groups[0].albert_layers
+        else:
+            # Standard BERT/RoBERTa
+            layers = self.encoder.layer
+
         # Register hooks on attention output layers
-        for layer_idx, layer in enumerate(self.encoder.layer):
+        for layer_idx, layer in enumerate(layers):
             if hasattr(layer, 'attention'):
                 if hasattr(layer.attention, 'output'):
                     # BERT-style: attention.output.dense
                     hook = layer.attention.output.register_forward_hook(make_attention_hook(layer_idx))
+                    hooks.append(hook)
+                elif hasattr(layer.attention, 'dense'):
+                    # ALBERT-style: attention.dense (output projection)
+                    hook = layer.attention.dense.register_forward_hook(make_attention_hook(layer_idx))
                     hooks.append(hook)
                 elif hasattr(layer.attention, 'self'):
                     # Alternative: hook on self-attention
@@ -881,13 +932,21 @@ class StructuredPruner:
         # Count parameters before
         params_before = sum(p.numel() for p in self.model.parameters())
 
+        # Get layers based on architecture
+        if self.is_albert:
+            # ALBERT: use first layer group's layers (they're shared)
+            layers = self.encoder.albert_layer_groups[0].albert_layers
+        else:
+            # Standard BERT/RoBERTa
+            layers = self.encoder.layer
+
         # Apply pruning using HuggingFace's built-in method
         pruned_count = 0
         for layer_idx, head_indices in heads_to_prune.items():
-            if layer_idx < len(self.encoder.layer):
-                layer = self.encoder.layer[layer_idx]
+            if layer_idx < len(layers):
+                layer = layers[layer_idx]
                 if hasattr(layer, 'attention'):
-                    # BERT/RoBERTa style
+                    # Try different prune_heads locations
                     if hasattr(layer.attention, 'prune_heads'):
                         layer.attention.prune_heads(set(head_indices))
                         pruned_count += len(head_indices)
