@@ -1,6 +1,6 @@
 # Phase 3 Research Documentation: Knowledge Distillation and Pruning for Bangla Cyberbullying Detection
 
-> **Document Version**: 1.1
+> **Document Version**: 1.2
 > **Last Updated**: January 2026
 > **Author**: Saif Siddique
 > **Repository**: https://github.com/SaifSiddique009/kd_pruning_quantization_framework_for_nlp
@@ -23,6 +23,9 @@
 12. [Results](#12-results-placeholder)
 13. [Appendices](#13-appendices)
 14. [Sparsity Measurement Scope Fix](#14-sparsity-measurement-scope-fix-added-january-2026)
+15. [KD Model Loading and Tokenizer Fixes](#15-kd-model-loading-and-tokenizer-fixes-added-january-2026)
+16. [Class Weights in Fine-Tuning After Pruning](#16-class-weights-in-fine-tuning-after-pruning-added-january-2026)
+17. [Token_type_ids Support for ALBERT-based Models](#17-token_type_ids-support-for-albert-based-models-added-january-2026)
 
 ---
 
@@ -581,8 +584,23 @@ layer.attention.prune_heads(set(head_indices))
 - Learning rate: 10× lower than initial training (`config.lr * 0.1`)
 - Epochs: 3 (default)
 - Model selection: F1 Weighted (primary metric)
+- **Class weights**: Optional, recommended for imbalanced multi-label data (see [Section 16](#16-class-weights-in-fine-tuning-after-pruning-added-january-2026))
 
-**Code** (`pruning.py`, Lines 1003-1014):
+**Code** (`pruning.py`, Lines 1003-1012):
+```python
+def fine_tune_after_pruning(
+    model: nn.Module,
+    train_loader,
+    val_loader,
+    config,
+    device: str,
+    use_student_input_ids: bool = False,
+    pruning_masks: Optional[Dict[str, torch.Tensor]] = None,
+    class_weights: Optional[torch.Tensor] = None  # Added Jan 2026
+) -> Dict:
+```
+
+**Optimizer Setup** (`pruning.py`, Lines 1051-1057):
 ```python
 # Lower learning rate for fine-tuning
 optimizer = AdamW(
@@ -594,10 +612,12 @@ optimizer = AdamW(
 
 **Typical Recovery:**
 ```
-Before pruning:  F1 = 0.75
-After pruning:   F1 = 0.60 (drop 15%)
-After fine-tune: F1 = 0.72 (recover 12%, net loss 3%)
+Before pruning:  F1 = 0.82
+After pruning:   F1 = 0.41 (drop 50%)
+After fine-tune: F1 = 0.71 (recover 30%, net loss 13%)
 ```
+
+> **Important**: For imbalanced multi-label datasets, always pass `class_weights` to prevent minority class collapse. See Section 16 for details.
 
 ### 6.7 Masked Fine-Tuning for Sparsity Preservation
 
@@ -776,11 +796,18 @@ phase_3_final/
 ├── data.py                 # Data loading/preprocessing
 ├── compression_config.py   # Configuration & arguments
 ├── kaggle_notebooks/       # Experiment notebooks
-│   ├── phase_a_baselines.ipynb
-│   ├── phase_b_kd_only.ipynb
-│   └── phase_cd_kd_prune.ipynb
+│   ├── phase_a_baselines.ipynb       # Baselines + FS pruning (6 runs)
+│   ├── phase_b_kd_only.ipynb         # KD training (4 runs)
+│   ├── phase_cd_magnitude.ipynb      # Magnitude pruning on KD models (4 runs)
+│   ├── phase_cd_wanda.ipynb          # WANDA pruning on KD models (4 runs)
+│   ├── phase_cd_gradual.ipynb        # Gradual pruning on KD models (4 runs)
+│   ├── phase_cd_structured.ipynb     # Structured pruning on KD models (4 runs)
+│   ├── phase_cd_kd_prune.ipynb       # Unified notebook (all 16 runs, optional)
+│   └── phase_e_sensitivity.ipynb     # Sensitivity analysis (4 runs)
 └── PHASE_3_RESEARCH_DOCUMENTATION.md
 ```
+
+> **Note**: Method-specific notebooks (`phase_cd_*.ipynb`) can run in parallel on separate Kaggle sessions for faster experiment completion.
 
 ### 9.2 Key Functions
 
@@ -881,12 +908,28 @@ if f1_weighted > best_f1:
 
 ### 11.1 Notebook Organization
 
+**Option A: Method-Specific Notebooks (Recommended for Parallel Execution)**
+
+| Notebook | Scenarios | Runs | Estimated Time |
+|----------|-----------|------|----------------|
+| `phase_a_baselines.ipynb` | 1, 3.1-3.2 | 6 | 3-4 hours |
+| `phase_b_kd_only.ipynb` | 2 | 4 | 8-10 hours |
+| `phase_cd_magnitude.ipynb` | 3.3-3.6 | 4 | 1-2 hours |
+| `phase_cd_wanda.ipynb` | 4.1-4.4 | 4 | 1-2 hours |
+| `phase_cd_gradual.ipynb` | 4.5-4.8 | 4 | 2-3 hours |
+| `phase_cd_structured.ipynb` | 4.9-4.12 | 4 | 1-2 hours |
+| `phase_e_sensitivity.ipynb` | Sensitivity | 4 | 2-3 hours |
+
+**Option B: Unified Notebook (Sequential Execution)**
+
 | Notebook | Scenarios | Runs | Estimated Time |
 |----------|-----------|------|----------------|
 | `phase_a_baselines.ipynb` | 1, 3.1-3.2 | 6 | 3-4 hours |
 | `phase_b_kd_only.ipynb` | 2 | 4 | 8-10 hours |
 | `phase_cd_kd_prune.ipynb` | 3.3-3.6, 4 | 16 | 6-8 hours |
 | `phase_e_sensitivity.ipynb` | Sensitivity | 4 | 2-3 hours |
+
+> **Recommendation**: Use Option A (method-specific notebooks) to run Phase C+D pruning methods in parallel across multiple Kaggle sessions, reducing total experiment time from ~8 hours to ~3 hours.
 
 **Total Experiments**: 30 (26 original + 4 sensitivity analysis)
 
@@ -1167,6 +1210,239 @@ target_sparsity ≈ desired_actual_sparsity / 0.77
 ```
 
 Where 0.77 is the approximate ratio of prunable (Linear) weights to total weights.
+
+---
+
+## 15. KD Model Loading and Tokenizer Fixes (Added January 2026)
+
+During Phase C/D experiments, we discovered critical issues with loading KD models from HuggingFace. This section documents the problems and solutions.
+
+### 15.1 Classifier Loading for KD Models
+
+**Problem Discovered**: When loading KD models for Phase C/D pruning, the baseline F1 dropped from 0.82 (Phase B) to 0.27 - a **67% drop**.
+
+**Root Cause**: Phase B saves classifier weights as `classifier.pt`, but the download filter only included `classifier_head.pt` (Phase A naming convention). The classifier weights were filtered out during download, resulting in random initialization.
+
+**Evidence in logs**:
+```
+[Warning] No classifier weights found!
+```
+
+**Solution** (`main.py`, Lines 483-488):
+```python
+# Download repo including pytorch_model.bin
+# NOTE: Include both classifier_head.pt (Phase A format) and classifier.pt (Phase B KD format)
+local_dir = snapshot_download(
+    repo_id=config.teacher_checkpoint,
+    allow_patterns=["encoder/*", "classifier_*.json", "classifier_head.pt",
+                   "classifier.pt", "pytorch_model.bin", "config.json"]
+)
+```
+
+**Three-Method Fallback Approach** (`main.py`, Lines 528-567):
+1. **Method 1**: Load from `classifier_head.pt` (Phase A format)
+2. **Method 1.5**: Load from `classifier.pt` (Phase B KD format)
+3. **Method 2**: Extract from `pytorch_model.bin` (fallback)
+
+### 15.2 Student Tokenizer Mapping Function
+
+**Problem**: During Phase B, KD models were accidentally saved with the teacher's tokenizer instead of the student's tokenizer. This caused embedding dimension mismatches when loading.
+
+**Solution**: Created `get_student_tokenizer_path()` function (`main.py`, Lines 97-123):
+
+```python
+def get_student_tokenizer_path(checkpoint_name: str) -> Optional[str]:
+    """
+    Map KD checkpoint name to correct student tokenizer path.
+
+    IMPORTANT: Uses ORIGINAL model paths from HuggingFace, not user's KD uploads,
+    because the KD uploads have the wrong (teacher) tokenizer saved.
+    """
+    mapping = {
+        "kd1": "neuropark/sahajBERT",           # SahajBERT (ALBERT-based)
+        "kd2": "csebuetnlp/banglabert_small",   # BanglaBERT-small (ELECTRA-based)
+        "kd3": "neuropark/sahajBERT",           # SahajBERT (ALBERT-based)
+        "kd4": "csebuetnlp/banglabert_small",   # BanglaBERT-small (ELECTRA-based)
+    }
+    checkpoint_lower = checkpoint_name.lower()
+    for kd_id, tokenizer_path in mapping.items():
+        if kd_id in checkpoint_lower:
+            return tokenizer_path
+    return None
+```
+
+### 15.3 Student Tokenizer for Data Tokenization
+
+**Problem**: In Phase C/D, data was being tokenized with the checkpoint's (incorrect) teacher tokenizer instead of the student tokenizer, causing embedding mismatches.
+
+**Solution** (`main.py`, Lines 1228-1234):
+```python
+# Check if this is a KD model - use correct STUDENT tokenizer for data tokenization
+if config.teacher_checkpoint:
+    student_tok_path = get_student_tokenizer_path(config.teacher_checkpoint)
+    if student_tok_path:
+        teacher_tokenizer_path = student_tok_path
+        print(f"   [Tokenizer] KD checkpoint detected!")
+        print(f"   [Tokenizer] Using STUDENT tokenizer for data: {student_tok_path}")
+```
+
+**Log output after fix**:
+```
+[Tokenizer] KD checkpoint detected!
+[Tokenizer] Using STUDENT tokenizer for data: neuropark/sahajBERT
+[Classifier] Loading from classifier.pt...
+[Classifier] Loaded from classifier.pt
+```
+
+---
+
+## 16. Class Weights in Fine-Tuning After Pruning (Added January 2026)
+
+### 16.1 Problem: Minority Class Collapse
+
+After applying aggressive magnitude pruning (65% target → 50% actual), minority class labels collapsed to F1=0.0 during fine-tuning:
+
+| Label | Before Pruning | After Pruning (Bug) | Distribution |
+|-------|---------------|---------------------|--------------|
+| bully | 0.90 | 0.86 | 64.2% (majority) |
+| sexual | 0.71 | **0.00** | 16.4% |
+| religious | 0.87 | 0.05 | 12.8% |
+| threat | 0.82 | **0.00** | 11.3% |
+| spam | 0.80 | **0.00** | 8.7% |
+
+**Root Cause**: The `fine_tune_after_pruning()` function used unweighted `BCEWithLogitsLoss()`, causing the optimizer to focus on the majority class (bully) and ignore minority classes.
+
+### 16.2 Solution: Weighted Loss in Fine-Tuning
+
+**Changes Made**:
+
+1. **Added `class_weights` parameter to `run_pruning()`** (`main.py`, Line 866-867):
+```python
+def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model_name="model",
+                use_student_input_ids=False, logger=None, class_weights=None):
+```
+
+2. **Added `class_weights` parameter to `fine_tune_after_pruning()`** (`pruning.py`, Lines 1003-1012):
+```python
+def fine_tune_after_pruning(
+    model: nn.Module,
+    train_loader,
+    val_loader,
+    config,
+    device: str,
+    use_student_input_ids: bool = False,
+    pruning_masks: Optional[Dict[str, torch.Tensor]] = None,
+    class_weights: Optional[torch.Tensor] = None  # NEW
+) -> Dict:
+```
+
+3. **Calculate and pass class weights** (`main.py`, Lines 1389-1391):
+```python
+# Calculate class weights for balanced fine-tuning after pruning
+train_labels = tokenized_data['labels'][train_idx]
+prune_class_weights = calculate_class_weights(train_labels.numpy(), config.label_columns)
+```
+
+4. **Use weighted loss** (`pruning.py`, Lines 1067-1072):
+```python
+# Use weighted loss to prevent minority class collapse after pruning
+if class_weights is not None:
+    loss_fn = nn.BCEWithLogitsLoss(pos_weight=class_weights.to(device))
+    print(f"   [Fine-tune] Using weighted loss (class_weights provided)")
+else:
+    loss_fn = nn.BCEWithLogitsLoss()
+```
+
+### 16.3 Results After Fix
+
+| Label | Before Pruning | After Pruning (Fixed) | Change |
+|-------|---------------|----------------------|--------|
+| bully | 0.90 | 0.84 | -6% |
+| sexual | 0.71 | **0.59** | -17% |
+| religious | 0.87 | **0.80** | -8% |
+| threat | 0.82 | **0.68** | -17% |
+| spam | 0.80 | **0.62** | -22% |
+
+**Key Improvement**: All minority classes now have meaningful F1 scores instead of collapsing to 0.0.
+
+---
+
+## 17. Token_type_ids Support for ALBERT-based Models (Added January 2026)
+
+### 17.1 Problem
+
+SahajBERT (`neuropark/sahajBERT`) is based on the ALBERT architecture, which requires `token_type_ids` (segment embeddings) as input. The original code didn't properly handle or pass `token_type_ids`, causing errors with ALBERT-based models.
+
+### 17.2 Solution: Comprehensive token_type_ids Handling
+
+Added `token_type_ids` support throughout the entire pipeline:
+
+**1. Data Tokenization** (`data.py`, Lines 205-220):
+```python
+# Create token_type_ids (all zeros for single-sentence classification)
+all_token_type_ids = [torch.zeros_like(ids) for ids in all_input_ids]
+
+tokenized_data = {
+    'input_ids': torch.stack(all_input_ids),
+    'attention_mask': torch.stack(all_attention_masks),
+    'token_type_ids': torch.stack(all_token_type_ids),  # NEW
+    'labels': labels
+}
+```
+
+**2. Model Forward Pass** (`distillation.py`, Lines 148-177):
+```python
+def forward(
+    self,
+    input_ids: torch.Tensor,
+    attention_mask: torch.Tensor,
+    token_type_ids: Optional[torch.Tensor] = None,  # NEW
+    labels: Optional[torch.Tensor] = None
+) -> Dict[str, torch.Tensor]:
+    # Create default token_type_ids if not provided
+    if token_type_ids is None:
+        token_type_ids = torch.zeros_like(input_ids)
+
+    outputs = self.encoder(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        token_type_ids=token_type_ids,  # Pass to encoder
+        return_dict=True
+    )
+```
+
+**3. Standard Pattern Used Throughout** (`main.py`, `pruning.py`, `evaluation.py`):
+```python
+token_type_ids = batch.get('token_type_ids')
+if token_type_ids is None:
+    token_type_ids = torch.zeros_like(input_ids)
+else:
+    token_type_ids = token_type_ids.to(device)
+
+outputs = model(input_ids, attention_mask, token_type_ids)
+```
+
+### 17.3 Dual Tokenization Support
+
+For KD training where teacher and student use different tokenizers:
+
+```python
+if use_student_input_ids and 'student_input_ids' in batch:
+    input_ids = batch['student_input_ids'].to(device)
+    attention_mask = batch['student_attention_mask'].to(device)
+    token_type_ids = batch.get('student_token_type_ids')  # Student-specific
+else:
+    input_ids = batch['input_ids'].to(device)
+    attention_mask = batch['attention_mask'].to(device)
+    token_type_ids = batch.get('token_type_ids')
+```
+
+**Files Updated**:
+- `data.py` - Tokenization
+- `distillation.py` - TeacherModel, StudentModel forward methods
+- `evaluation.py` - Evaluation loops
+- `pruning.py` - Fine-tuning loops
+- `main.py` - Training and evaluation throughout
 
 ---
 

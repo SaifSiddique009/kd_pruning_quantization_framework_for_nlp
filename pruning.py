@@ -508,7 +508,7 @@ class WandaPruner(PruningManager):
                 if len(input) > 0 and input[0] is not None:
                     # Get L2 norm of input activations
                     act = input[0].detach()
-                    act_norm = act.abs().mean(dim=0)  # [hidden_size]
+                    act_norm = act.abs().mean(dim=(0, 1))  # [hidden_size] - average over batch AND sequence
                     
                     if activation_sums[name] is None:
                         activation_sums[name] = act_norm

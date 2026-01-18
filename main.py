@@ -70,7 +70,7 @@ from distillation import (
     MultiLabelDistillationLoss, verify_teacher_performance
 )
 from pruning import (
-    PruningManager, GradualPruner, WandaPruner,
+    PruningManager, GradualPruner, WandaPruner, StructuredPruner,
     get_pruner, fine_tune_after_pruning
 )
 from quantization import (
@@ -991,6 +991,14 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         )
         pruner.collect_activations(train_loader, device, num_samples=config.calib_samples)
         pruner.apply_wanda_pruning()
+
+    elif config.prune_method == 'structured':
+        pruner = StructuredPruner(
+            model=model,
+            target_sparsity=config.prune_sparsity,
+            importance_method='activation'
+        )
+        pruner.apply_structured_pruning(train_loader, device, num_samples=config.calib_samples)
 
     else:
         raise ValueError(f"Unknown pruning method: {config.prune_method}")
