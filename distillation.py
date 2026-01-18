@@ -142,21 +142,23 @@ class TeacherModel(nn.Module):
         self.hidden_size = hidden_size
     
     def forward(
-        self, 
+        self,
         input_ids: torch.Tensor,
         attention_mask: Optional[torch.Tensor] = None,
+        token_type_ids: Optional[torch.Tensor] = None,
         output_hidden_states: bool = False,
         output_attentions: bool = False
     ) -> Dict[str, torch.Tensor]:
         """
         Forward pass through the model.
-        
+
         Args:
             input_ids: Token IDs [batch_size, seq_length]
             attention_mask: Mask for padding tokens [batch_size, seq_length]
+            token_type_ids: Segment IDs [batch_size, seq_length] (0 for single sentence)
             output_hidden_states: Whether to return all hidden states
             output_attentions: Whether to return attention weights
-        
+
         Returns:
             Dict with:
             - 'logits': Raw predictions [batch_size, num_labels]
@@ -164,10 +166,15 @@ class TeacherModel(nn.Module):
             - 'hidden_states': (optional) All layer outputs
             - 'attentions': (optional) All attention weights
         """
+        # Create default token_type_ids if not provided (all zeros for single-sentence tasks)
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+
         # Pass through encoder
         outputs = self.encoder(
             input_ids=input_ids,
             attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
             output_hidden_states=output_hidden_states,
             output_attentions=output_attentions
         )

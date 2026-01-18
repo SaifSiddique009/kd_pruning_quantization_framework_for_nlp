@@ -573,10 +573,15 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
         for batch in pbar:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch.get('token_type_ids')
+            if token_type_ids is None:
+                token_type_ids = torch.zeros_like(input_ids)
+            else:
+                token_type_ids = token_type_ids.to(device)
             labels = batch['labels'].to(device)
 
             optimizer.zero_grad()
-            outputs = teacher(input_ids, attention_mask)
+            outputs = teacher(input_ids, attention_mask, token_type_ids)
             loss = loss_fn(outputs['logits'], labels)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(teacher.parameters(), config.gradient_clip_norm)
@@ -596,7 +601,12 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
             for batch in val_loader:
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
-                outputs = teacher(input_ids, attention_mask)
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is None:
+                    token_type_ids = torch.zeros_like(input_ids)
+                else:
+                    token_type_ids = token_type_ids.to(device)
+                outputs = teacher(input_ids, attention_mask, token_type_ids)
                 preds = (torch.sigmoid(outputs['logits']) > 0.5).cpu().numpy()
                 all_preds.extend(preds)
                 all_labels.extend(batch['labels'].numpy())
@@ -843,8 +853,21 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
     # Helper function to get input tensors based on tokenization mode
     def get_input_tensors(batch):
         if use_student_input_ids and 'student_input_ids' in batch:
-            return batch['student_input_ids'].to(device), batch['student_attention_mask'].to(device)
-        return batch['input_ids'].to(device), batch['attention_mask'].to(device)
+            input_ids = batch['student_input_ids'].to(device)
+            attention_mask = batch['student_attention_mask'].to(device)
+            token_type_ids = batch.get('student_token_type_ids')
+        else:
+            input_ids = batch['input_ids'].to(device)
+            attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch.get('token_type_ids')
+        
+        # Create default token_type_ids (zeros) if not in batch
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+        else:
+            token_type_ids = token_type_ids.to(device)
+        
+        return input_ids, attention_mask, token_type_ids
 
     # Get initial metrics
     from sklearn.metrics import f1_score
@@ -852,8 +875,8 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
     all_preds, all_labels = [], []
     with torch.no_grad():
         for batch in val_loader:
-            input_ids, attention_mask = get_input_tensors(batch)
-            outputs = model(input_ids, attention_mask)
+            input_ids, attention_mask, token_type_ids = get_input_tensors(batch)
+            outputs = model(input_ids, attention_mask, token_type_ids)
             logits = outputs['logits'] if isinstance(outputs, dict) else outputs
             preds = (torch.sigmoid(logits) > 0.5).cpu().numpy()
             all_preds.extend(preds)
@@ -892,11 +915,11 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         for epoch in range(config.prune_end_epoch):
             model.train()
             for batch in tqdm(train_loader, desc=f"Gradual Prune Epoch {epoch+1}"):
-                input_ids, attention_mask = get_input_tensors(batch)
+                input_ids, attention_mask, token_type_ids = get_input_tensors(batch)
                 labels = batch['labels'].to(device)
 
                 optimizer.zero_grad()
-                outputs = model(input_ids, attention_mask)
+                outputs = model(input_ids, attention_mask, token_type_ids)
                 logits = outputs['logits'] if isinstance(outputs, dict) else outputs
                 loss = loss_fn(logits, labels)
                 loss.backward()
@@ -934,8 +957,8 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
     all_preds, all_labels = [], []
     with torch.no_grad():
         for batch in val_loader:
-            input_ids, attention_mask = get_input_tensors(batch)
-            outputs = model(input_ids, attention_mask)
+            input_ids, attention_mask, token_type_ids = get_input_tensors(batch)
+            outputs = model(input_ids, attention_mask, token_type_ids)
             logits = outputs['logits'] if isinstance(outputs, dict) else outputs
             preds = (torch.sigmoid(logits) > 0.5).cpu().numpy()
             all_preds.extend(preds)
@@ -961,8 +984,8 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         all_preds, all_labels = [], []
         with torch.no_grad():
             for batch in val_loader:
-                input_ids, attention_mask = get_input_tensors(batch)
-                outputs = model(input_ids, attention_mask)
+                input_ids, attention_mask, token_type_ids = get_input_tensors(batch)
+                outputs = model(input_ids, attention_mask, token_type_ids)
                 logits = outputs['logits'] if isinstance(outputs, dict) else outputs
                 preds = (torch.sigmoid(logits) > 0.5).cpu().numpy()
                 all_preds.extend(preds)

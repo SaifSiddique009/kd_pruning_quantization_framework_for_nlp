@@ -537,9 +537,14 @@ class WandaPruner(PruningManager):
                 
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is None:
+                    token_type_ids = torch.zeros_like(input_ids)
+                else:
+                    token_type_ids = token_type_ids.to(device)
                 
                 # Forward pass (hooks will capture activations)
-                self.model(input_ids, attention_mask)
+                self.model(input_ids, attention_mask, token_type_ids)
                 
                 samples_seen += input_ids.shape[0]
         
@@ -785,9 +790,14 @@ class StructuredPruner:
 
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
+                token_type_ids = batch.get('token_type_ids')
+                if token_type_ids is None:
+                    token_type_ids = torch.zeros_like(input_ids)
+                else:
+                    token_type_ids = token_type_ids.to(device)
 
                 try:
-                    self.model(input_ids, attention_mask)
+                    self.model(input_ids, attention_mask, token_type_ids)
                 except:
                     # Some models return different outputs
                     pass
@@ -1069,14 +1079,22 @@ def fine_tune_after_pruning(
             if use_student_input_ids and 'student_input_ids' in batch:
                 input_ids = batch['student_input_ids'].to(device)
                 attention_mask = batch['student_attention_mask'].to(device)
+                token_type_ids = batch.get('student_token_type_ids')
             else:
                 input_ids = batch['input_ids'].to(device)
                 attention_mask = batch['attention_mask'].to(device)
+                token_type_ids = batch.get('token_type_ids')
+            
+            # Create default token_type_ids (zeros) if not in batch
+            if token_type_ids is None:
+                token_type_ids = torch.zeros_like(input_ids)
+            else:
+                token_type_ids = token_type_ids.to(device)
 
             labels = batch['labels'].to(device)
 
             optimizer.zero_grad()
-            outputs = model(input_ids, attention_mask)
+            outputs = model(input_ids, attention_mask, token_type_ids)
             loss = loss_fn(outputs['logits'], labels)
             loss.backward()
             
@@ -1110,13 +1128,21 @@ def fine_tune_after_pruning(
                 if use_student_input_ids and 'student_input_ids' in batch:
                     input_ids = batch['student_input_ids'].to(device)
                     attention_mask = batch['student_attention_mask'].to(device)
+                    token_type_ids = batch.get('student_token_type_ids')
                 else:
                     input_ids = batch['input_ids'].to(device)
                     attention_mask = batch['attention_mask'].to(device)
+                    token_type_ids = batch.get('token_type_ids')
+                
+                # Create default token_type_ids (zeros) if not in batch
+                if token_type_ids is None:
+                    token_type_ids = torch.zeros_like(input_ids)
+                else:
+                    token_type_ids = token_type_ids.to(device)
 
                 labels_batch = batch['labels'].to(device)
 
-                outputs = model(input_ids, attention_mask)
+                outputs = model(input_ids, attention_mask, token_type_ids)
 
                 # Calculate validation loss
                 batch_loss = loss_fn(outputs['logits'], labels_batch)

@@ -202,16 +202,22 @@ def get_or_create_tokenized_dataset(
             all_student_attention_masks.append(student_encoding['attention_mask'].squeeze(0))
 
     # Stack into tensors
+    # Create token_type_ids (all zeros for single-sentence classification)
+    all_token_type_ids = [torch.zeros_like(ids) for ids in all_input_ids]
+
     tokenized_data = {
         'input_ids': torch.stack(all_input_ids),
         'attention_mask': torch.stack(all_attention_masks),
+        'token_type_ids': torch.stack(all_token_type_ids),
         'labels': torch.tensor(labels, dtype=torch.float32)
     }
 
     # Add student tokens if dual tokenization
     if student_tokenizer:
+        all_student_token_type_ids = [torch.zeros_like(ids) for ids in all_student_input_ids]
         tokenized_data['student_input_ids'] = torch.stack(all_student_input_ids)
         tokenized_data['student_attention_mask'] = torch.stack(all_student_attention_masks)
+        tokenized_data['student_token_type_ids'] = torch.stack(all_student_token_type_ids)
 
     # Save to cache
     torch.save(tokenized_data, cache_path)
@@ -259,12 +265,14 @@ class IndexedDataset(Dataset):
         """
         self.input_ids = tokenized_data['input_ids']
         self.attention_mask = tokenized_data['attention_mask']
+        self.token_type_ids = tokenized_data.get('token_type_ids')
         self.labels = tokenized_data['labels']
         self.indices = indices
 
         # Optional student tokens for dual tokenization (KD)
         self.student_input_ids = tokenized_data.get('student_input_ids')
         self.student_attention_mask = tokenized_data.get('student_attention_mask')
+        self.student_token_type_ids = tokenized_data.get('student_token_type_ids')
         self.has_student_tokens = self.student_input_ids is not None
 
     def __len__(self) -> int:
@@ -280,10 +288,16 @@ class IndexedDataset(Dataset):
             'labels': self.labels[real_idx]
         }
 
+        # Add token_type_ids if available
+        if self.token_type_ids is not None:
+            item['token_type_ids'] = self.token_type_ids[real_idx]
+
         # Add student tokens if available
         if self.has_student_tokens:
             item['student_input_ids'] = self.student_input_ids[real_idx]
             item['student_attention_mask'] = self.student_attention_mask[real_idx]
+            if self.student_token_type_ids is not None:
+                item['student_token_type_ids'] = self.student_token_type_ids[real_idx]
 
         return item
 

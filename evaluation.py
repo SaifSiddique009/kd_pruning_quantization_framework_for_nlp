@@ -275,12 +275,21 @@ class CompressionEvaluator:
                 if use_student_input_ids and 'student_input_ids' in batch:
                     input_ids = batch['student_input_ids'].to(device)
                     attention_mask = batch['student_attention_mask'].to(device)
+                    token_type_ids = batch.get('student_token_type_ids')
                 else:
                     input_ids = batch['input_ids'].to(device)
                     attention_mask = batch['attention_mask'].to(device)
+                    token_type_ids = batch.get('token_type_ids')
+                
+                # Create default token_type_ids (zeros) if not in batch
+                if token_type_ids is None:
+                    token_type_ids = torch.zeros_like(input_ids)
+                else:
+                    token_type_ids = token_type_ids.to(device)
+                
                 labels = batch['labels']
 
-                outputs = model(input_ids, attention_mask)
+                outputs = model(input_ids, attention_mask, token_type_ids)
                 logits = outputs['logits'] if isinstance(outputs, dict) else outputs[0] if isinstance(outputs, tuple) else outputs
 
                 probs = torch.sigmoid(logits).cpu().numpy()
@@ -350,21 +359,30 @@ class CompressionEvaluator:
         if use_student_input_ids and 'student_input_ids' in batch:
             input_ids = batch['student_input_ids'].to(device)
             attention_mask = batch['student_attention_mask'].to(device)
+            token_type_ids = batch.get('student_token_type_ids')
         else:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch.get('token_type_ids')
+
+        # Create default token_type_ids (zeros) if not in batch
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+        else:
+            token_type_ids = token_type_ids.to(device)
 
         # Optionally use a fixed batch size for latency measurement
         if latency_batch_size is not None and latency_batch_size < input_ids.shape[0]:
             input_ids = input_ids[:latency_batch_size]
             attention_mask = attention_mask[:latency_batch_size]
+            token_type_ids = token_type_ids[:latency_batch_size]
 
         batch_size = input_ids.shape[0]
 
         # Warmup
         with torch.no_grad():
             for _ in range(10):
-                _ = model(input_ids, attention_mask)
+                _ = model(input_ids, attention_mask, token_type_ids)
 
         if device == 'cuda':
             torch.cuda.synchronize()
@@ -375,7 +393,7 @@ class CompressionEvaluator:
                 if device == 'cuda':
                     torch.cuda.synchronize()
                 start = time.perf_counter()
-                _ = model(input_ids, attention_mask)
+                _ = model(input_ids, attention_mask, token_type_ids)
                 if device == 'cuda':
                     torch.cuda.synchronize()
                 latencies.append((time.perf_counter() - start) * 1000)
@@ -399,12 +417,20 @@ class CompressionEvaluator:
         if use_student_input_ids and 'student_input_ids' in batch:
             input_ids = batch['student_input_ids'].to(device)
             attention_mask = batch['student_attention_mask'].to(device)
+            token_type_ids = batch.get('student_token_type_ids')
         else:
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
+            token_type_ids = batch.get('token_type_ids')
+
+        # Create default token_type_ids (zeros) if not in batch
+        if token_type_ids is None:
+            token_type_ids = torch.zeros_like(input_ids)
+        else:
+            token_type_ids = token_type_ids.to(device)
 
         with torch.no_grad():
-            _ = model(input_ids, attention_mask)
+            _ = model(input_ids, attention_mask, token_type_ids)
         return {'peak_memory_mb': torch.cuda.max_memory_allocated() / (1024 ** 2)}
 
 

@@ -51,7 +51,17 @@ This research investigates model compression techniques for Bangla cyberbullying
 | Scenario 2 | Knowledge Distillation only (KD1-KD4) | 4 |
 | Scenario 3 | Magnitude Pruning (FS1, FS2, KD1-KD4) | 6 |
 | Scenario 4 | Pruning Methods Comparison (WANDA, Gradual, Structured) | 12 |
-| **Total** | | **26** |
+| Scenario 5 | Sensitivity Analysis (30% and 70% sparsity) | 4 |
+| **Total** | | **30** |
+
+### 1.4 Preliminary Findings (Phase A)
+
+**FS2 Model Capacity Limitation**: During Phase A pruning experiments, we observed that the smaller BanglaBERT-small model (FS2, 13.7M parameters) experienced catastrophic performance degradation at ~50% sparsity:
+- **F1 Macro dropped from 0.8142 to 0.1795** (77.9% decrease)
+- Per-label performance collapsed on `sexual` (0→0), `threat` (0.84→0), `religious` (0.88→0.06)
+- The larger SahajBERT model (FS1, 18.2M params) maintained reasonable performance at 50% sparsity (F1: 0.82→0.75, only 9% drop)
+
+**Implication**: This suggests a minimum model capacity threshold for aggressive pruning in multi-label classification tasks. Smaller models may require lower sparsity targets or alternative compression strategies.
 
 ---
 
