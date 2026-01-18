@@ -480,10 +480,11 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
             print("   [Format] TransformerMultiLabelClassifier format")
 
             # Download repo including pytorch_model.bin
+            # NOTE: Include both classifier_head.pt (Phase A format) and classifier.pt (Phase B KD format)
             local_dir = snapshot_download(
                 repo_id=config.teacher_checkpoint,
                 allow_patterns=["encoder/*", "classifier_*.json", "classifier_head.pt",
-                               "pytorch_model.bin", "config.json"]
+                               "classifier.pt", "pytorch_model.bin", "config.json"]
             )
             print(f"   [Download] Files cached to: {local_dir}")
 
@@ -863,7 +864,7 @@ def run_knowledge_distillation(config, teacher, tokenized_data, train_idx, val_i
 # =============================================================================
 
 def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model_name="model",
-                use_student_input_ids=False, logger=None):
+                use_student_input_ids=False, logger=None, class_weights=None):
     """
     Apply pruning to the model.
 
@@ -883,6 +884,7 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         model_name: Name of the model being pruned
         use_student_input_ids: If True, use student tokens for evaluation
         logger: Optional logger instance
+        class_weights: Optional tensor for balanced fine-tuning after pruning
 
     Returns:
         Tuple of (pruned model, pruning_metrics dict)
@@ -1026,7 +1028,8 @@ def run_pruning(config, model, tokenized_data, train_idx, val_idx, device, model
         fine_tune_metrics = fine_tune_after_pruning(
             model, train_loader, val_loader, config, device,
             use_student_input_ids=use_student_input_ids,
-            pruning_masks=pruning_masks  # Pass masks to maintain sparsity
+            pruning_masks=pruning_masks,  # Pass masks to maintain sparsity
+            class_weights=class_weights  # Pass class weights for balanced fine-tuning
         )
 
         # Get F1 after fine-tuning
@@ -1383,11 +1386,16 @@ def run_compression_pipeline(config):
             log_stage_start('Pruning')
             print(f"\n   [NOTE] Pruning will be applied to: {current_model_name}")
 
+            # Calculate class weights for balanced fine-tuning after pruning
+            train_labels = tokenized_data['labels'][train_idx]
+            prune_class_weights = calculate_class_weights(train_labels.numpy(), config.label_columns)
+
             pruned_model, pruning_metrics_dict = run_pruning(
                 config, current_model, tokenized_data, train_idx, val_idx, device,
                 model_name=current_model_name,
                 use_student_input_ids=use_student_tokens_for_eval,
-                logger=logger
+                logger=logger,
+                class_weights=prune_class_weights
             )
             training_metrics['pruning'] = pruning_metrics_dict
 

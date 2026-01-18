@@ -1007,7 +1007,8 @@ def fine_tune_after_pruning(
     config,
     device: str,
     use_student_input_ids: bool = False,
-    pruning_masks: Optional[Dict[str, torch.Tensor]] = None
+    pruning_masks: Optional[Dict[str, torch.Tensor]] = None,
+    class_weights: Optional[torch.Tensor] = None
 ) -> Dict:
     """
     Fine-tune model after pruning to recover accuracy.
@@ -1030,6 +1031,8 @@ def fine_tune_after_pruning(
         pruning_masks: Optional dict mapping parameter names to mask tensors.
                       If provided, enforces sparsity during fine-tuning by
                       zeroing gradients for pruned weights.
+        class_weights: Optional tensor of class weights for handling imbalanced
+                      multi-label classification. Prevents minority class collapse.
 
     Returns:
         Dict with detailed fine-tuning metrics including:
@@ -1061,7 +1064,12 @@ def fine_tune_after_pruning(
         num_training_steps=total_steps
     )
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    # Use weighted loss to prevent minority class collapse after pruning
+    if class_weights is not None:
+        loss_fn = nn.BCEWithLogitsLoss(pos_weight=class_weights.to(device))
+        print(f"   [Fine-tune] Using weighted loss (class_weights provided)")
+    else:
+        loss_fn = nn.BCEWithLogitsLoss()
 
     # Tracking metrics
     best_f1 = 0
