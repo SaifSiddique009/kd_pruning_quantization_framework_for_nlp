@@ -679,6 +679,9 @@ class StructuredPruner:
         self.num_heads = 0
         self.is_albert = False  # Will be set by _find_encoder_structure()
 
+        # Store original parameter count for sparsity calculation
+        self.original_params = sum(p.numel() for p in model.parameters())
+
         # Find encoder structure
         self._find_encoder_structure()
 
@@ -994,6 +997,28 @@ class StructuredPruner:
         stats = self.prune_attention_heads(heads_to_prune)
 
         return stats
+
+    def get_sparsity(self) -> Dict[str, float]:
+        """
+        Calculate sparsity by comparing current parameters to original.
+
+        For structured pruning, sparsity = (removed_params / original_params)
+        since we physically remove heads, not just zero them out.
+
+        Returns:
+            Dict with sparsity metrics matching PruningManager interface
+        """
+        current_params = sum(p.numel() for p in self.model.parameters())
+        removed_params = self.original_params - current_params
+        sparsity = removed_params / self.original_params if self.original_params > 0 else 0
+
+        return {
+            'overall': sparsity,
+            'total_params': self.original_params,
+            'zero_params': removed_params,  # "removed" params for structured pruning
+            'nonzero_params': current_params,
+            'per_layer': {}  # Per-layer breakdown not applicable for head pruning
+        }
 
 
 # =============================================================================
