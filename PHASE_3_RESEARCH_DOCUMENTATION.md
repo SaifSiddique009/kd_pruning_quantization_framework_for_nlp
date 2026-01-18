@@ -1,7 +1,7 @@
 # Phase 3 Research Documentation: Knowledge Distillation and Pruning for Bangla Cyberbullying Detection
 
-> **Document Version**: 1.0
-> **Last Updated**: January 2025
+> **Document Version**: 1.1
+> **Last Updated**: January 2026
 > **Author**: Saif Siddique
 > **Repository**: https://github.com/SaifSiddique009/kd_pruning_quantization_framework_for_nlp
 
@@ -22,6 +22,7 @@
 11. [Experiment Execution Plan](#11-experiment-execution-plan)
 12. [Results](#12-results-placeholder)
 13. [Appendices](#13-appendices)
+14. [Sparsity Measurement Scope Fix](#14-sparsity-measurement-scope-fix-added-january-2026)
 
 ---
 
@@ -823,8 +824,8 @@ phase_3_final/
 | 9 | KD hyperparameters | Student-matched | Use FS1/FS2 optimal configs |
 | 10 | Fine-tune after prune | Always enabled | Essential for accuracy recovery |
 | 11 | Fine-tune learning rate | 10× lower | Standard practice |
-| 12 | Pruning target sparsity | 50% | Balance compression/accuracy |
-| 13 | Structured sparsity | 30% | More conservative for head pruning |
+| 12 | Pruning target sparsity | 65% target (→~50% actual) | Adjusted for measurement scope |
+| 13 | Structured sparsity | 39% target (→~30% actual) | More conservative for head pruning |
 
 ### Detailed Rationale
 
@@ -1112,3 +1113,50 @@ if f1_weighted > best_f1:
 ---
 
 *Document generated for Phase 3 research on Knowledge Distillation and Pruning for Bangla Cyberbullying Detection.*
+
+---
+
+## 14. Sparsity Measurement Scope Fix (Added January 2026)
+
+### Issue Discovered
+
+Initial Phase A pruning experiments achieved only 35-38% actual sparsity instead of the 50% target.
+
+### Root Cause: Measurement Scope Mismatch
+
+| Component | Scope | Details |
+|-----------|-------|---------|
+| `apply_magnitude_pruning()` | Linear layers only (~60-77% of model) | Prunes 50% of these weights |
+| `get_sparsity()` | ALL model weights (100%) | Measures zeros across everything |
+| **Result** | 50% of 60% ≈ **30-38%** overall | Target not met! |
+
+### Mathematical Explanation
+
+For a BERT-like model with 18.2M parameters:
+- Linear layer parameters: ~11M (60%)
+- Other parameters (embeddings, LayerNorm, biases): ~7.2M (40%)
+
+When pruning 50% of Linear layers:
+- Zeros created: 11M × 0.5 = 5.5M
+- Total sparsity: 5.5M / 18.2M ≈ **30-38%**
+
+### Solution: Adjusted Target Sparsity
+
+To achieve the desired **actual** sparsity, we increased the target values:
+
+| Desired Actual | New Target | Previous Target | Notebooks Updated |
+|----------------|------------|-----------------|-------------------|
+| ~50% overall | **0.65** | 0.50 | phase_a, phase_cd_magnitude/wanda/gradual |
+| ~30% overall | **0.39** | 0.30 | phase_cd_structured, phase_e (low) |
+| ~70% overall | **0.91** | 0.70 | phase_e (high) |
+
+### Formula
+
+```
+target_sparsity ≈ desired_actual_sparsity / 0.77
+```
+
+Where 0.77 is the approximate ratio of prunable (Linear) weights to total weights.
+
+---
+
