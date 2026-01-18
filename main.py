@@ -1219,11 +1219,20 @@ def run_compression_pipeline(config):
         print(f"   [Data Fraction] Using {n_samples} samples ({config.data_fraction*100:.0f}%)")
 
     # Load tokenizers
-    # IMPORTANT: If teacher_checkpoint is provided, use its tokenizer for consistency
+    # IMPORTANT: If teacher_checkpoint is a KD model, use STUDENT tokenizer for data
     teacher_tokenizer_path = config.teacher_checkpoint if config.teacher_checkpoint else config.teacher_path
+
+    # Check if this is a KD model - use correct STUDENT tokenizer for data tokenization
+    if config.teacher_checkpoint:
+        student_tok_path = get_student_tokenizer_path(config.teacher_checkpoint)
+        if student_tok_path:
+            teacher_tokenizer_path = student_tok_path
+            print(f"   [Tokenizer] KD checkpoint detected!")
+            print(f"   [Tokenizer] Using STUDENT tokenizer for data: {student_tok_path}")
+
     teacher_tokenizer = AutoTokenizer.from_pretrained(teacher_tokenizer_path)
     logger.info(f"Teacher tokenizer loaded from: {teacher_tokenizer_path}")
-    print(f"   [Tokenizer] Teacher: {teacher_tokenizer_path}")
+    print(f"   [Tokenizer] Data tokenization: {teacher_tokenizer_path}")
 
     # Load student tokenizer if different from teacher (for dual tokenization)
     student_tokenizer = None
