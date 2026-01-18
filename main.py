@@ -87,6 +87,40 @@ from logging_utils import (
     log_model_info, log_stage_start, log_stage_end, log_metrics,
     log_memory_usage, log_gpu_info, log_error, log_final_summary
 )
+from typing import Optional
+
+
+# =============================================================================
+# KD MODEL TOKENIZER MAPPING
+# =============================================================================
+
+def get_student_tokenizer_path(checkpoint_name: str) -> Optional[str]:
+    """
+    Map KD checkpoint name to correct student tokenizer path.
+
+    IMPORTANT: Uses ORIGINAL model paths from HuggingFace, not user's KD uploads,
+    because the KD uploads have the wrong (teacher) tokenizer saved.
+
+    During Phase B, the teacher tokenizer was incorrectly saved with the student model.
+    This function maps KD model checkpoints to the correct student tokenizer sources.
+
+    Args:
+        checkpoint_name: HuggingFace checkpoint path (e.g., "Saif-Siddique/bangla-cyberbully-kd1-...")
+
+    Returns:
+        Correct student tokenizer path, or None if not a recognized KD model
+    """
+    mapping = {
+        "kd1": "neuropark/sahajBERT",           # SahajBERT (ALBERT-based)
+        "kd2": "csebuetnlp/banglabert_small",   # BanglaBERT-small (ELECTRA-based)
+        "kd3": "neuropark/sahajBERT",           # SahajBERT (ALBERT-based)
+        "kd4": "csebuetnlp/banglabert_small",   # BanglaBERT-small (ELECTRA-based)
+    }
+    checkpoint_lower = checkpoint_name.lower()
+    for kd_id, tokenizer_path in mapping.items():
+        if kd_id in checkpoint_lower:
+            return tokenizer_path
+    return None
 
 
 # =============================================================================
@@ -181,7 +215,7 @@ def save_model_for_huggingface(model, save_path, tokenizer=None):
     
     # Save classifier separately
     if hasattr(model, 'classifier'):
-        classifier_path = os.path.join(save_path, 'classifier.pt')
+        classifier_path = os.path.join(save_path, 'classifier_head.pt')
         torch.save(model.classifier.state_dict(), classifier_path)
         
         # Save classifier config
@@ -215,7 +249,7 @@ classifier = nn.Sequential(
     nn.Dropout(0.1),
     nn.Linear(256, 5)  # 5 labels
 )
-classifier.load_state_dict(torch.load("{save_path}/classifier.pt"))
+classifier.load_state_dict(torch.load("{save_path}/classifier_head.pt"))
 
 # Load tokenizer
 tokenizer = AutoTokenizer.from_pretrained("{save_path}")
@@ -429,9 +463,15 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
     if config.teacher_checkpoint:
         print(f"\n[Loading] Pre-trained teacher from: {config.teacher_checkpoint}")
 
-        # IMPORTANT: Use tokenizer from checkpoint, not teacher_path!
-        tokenizer = AutoTokenizer.from_pretrained(config.teacher_checkpoint)
-        print(f"   [Tokenizer] Loaded from: {config.teacher_checkpoint}")
+        # Check if this is a KD model - use correct STUDENT tokenizer
+        student_tokenizer_path = get_student_tokenizer_path(config.teacher_checkpoint)
+        if student_tokenizer_path:
+            tokenizer = AutoTokenizer.from_pretrained(student_tokenizer_path)
+            print(f"   [Tokenizer] Using STUDENT tokenizer: {student_tokenizer_path}")
+            print(f"   [Note] KD model requires student tokenizer, not checkpoint tokenizer")
+        else:
+            tokenizer = AutoTokenizer.from_pretrained(config.teacher_checkpoint)
+            print(f"   [Tokenizer] Loaded from: {config.teacher_checkpoint}")
 
         # Load using TransformerMultiLabelClassifier format
         try:
@@ -498,6 +538,16 @@ def get_or_train_teacher(config, tokenized_data, train_idx, val_idx, device, log
                     teacher.classifier.load_state_dict(classifier_weights)
                     print(f"   [Classifier] Loaded directly")
                 loaded_classifier = True
+
+            # Method 1.5: Load from classifier.pt (alternative name used in save)
+            if not loaded_classifier:
+                classifier_pt_path = os.path.join(local_dir, 'classifier.pt')
+                if os.path.exists(classifier_pt_path):
+                    print(f"   [Classifier] Loading from classifier.pt...")
+                    classifier_weights = torch.load(classifier_pt_path, map_location='cpu')
+                    teacher.classifier.load_state_dict(classifier_weights)
+                    print(f"   [Classifier] Loaded from classifier.pt")
+                    loaded_classifier = True
 
             # Method 2: Load from pytorch_model.bin (fallback)
             if not loaded_classifier:
@@ -1392,8 +1442,14 @@ def run_compression_pipeline(config):
 
         # Save final model (only for first fold or single fold)
         if fold_idx == 0:
+            # Use student tokenizer for KD models (not teacher tokenizer)
+            if config.enable_kd and student_tokenizer is not None:
+                save_tokenizer = student_tokenizer
+                print("   [Save] Using student tokenizer for HuggingFace save")
+            else:
+                save_tokenizer = tokenizer
             save_model_for_huggingface(
-                current_model, os.path.join(config.output_dir, 'model_final_hf'), tokenizer
+                current_model, os.path.join(config.output_dir, 'model_final_hf'), save_tokenizer
             )
 
     # ==========================================================================
